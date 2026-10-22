@@ -10,9 +10,7 @@ from datetime import datetime, timedelta, timezone
 from rubka import Robot, Message
 
 # ═════════════════════════════════════════════════════════════
-# ⚡ BOT M4 ⚡ — v3.1
-# Locks: link, id, spam, profanity, kodhengi (ALL ON by default)
-# Features: Special users, Welcome, Font, Games
+# ⚡ BOT M4 ⚡ — v3.2 (Fixed Owner System)
 # ═════════════════════════════════════════════════════════════
 
 TOKEN = os.getenv("RUBIKA_TOKEN", "").strip()
@@ -20,10 +18,8 @@ if not TOKEN:
     raise RuntimeError("❌ RUBIKA_TOKEN تنظیم نشده است.")
 
 bot = Robot(token=TOKEN)
-OWNER_ID = "u0KUJo1004f46bafc48e536f282693b6"
 BOT_ID_CACHE = {"id": None}
 IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
-BOT_FOOTER = "⚡ **BOT M4**"
 
 
 def get_local_now():
@@ -74,7 +70,6 @@ def _write_json(paths, value):
     return False
 
 
-# ── تنظیمات پیش‌فرض: همه قفل‌ها روشن ──
 _DEFAULT_SETTINGS = {
     "link": True,
     "id": True,
@@ -89,6 +84,7 @@ _DEFAULT_DATA = {
     "games": {}, "bot_is_active": False,
     "special_users": {},
     "group_settings": {},
+    "group_owners": {},
 }
 
 bot_data = _read_json(DATA_PATHS, {})
@@ -110,7 +106,6 @@ save_data(bot_data)
 
 
 def get_group_settings(chat_id):
-    """تنظیمات مخصوص هر گروه — پیش‌فرض همه قفل‌ها روشن"""
     gs = bot_data.setdefault("group_settings", {}).get(chat_id)
     if not isinstance(gs, dict):
         gs = {}
@@ -391,7 +386,6 @@ def contains_id(text):
     return False
 
 
-# ─────────── کد هنگی (پیام طولانی/هنگ‌کننده) ───────────
 def contains_kodhengi(text):
     if not text: return False
     s = str(text)
@@ -410,7 +404,7 @@ def contains_kodhengi(text):
     return False
 
 
-# ─────────── فحش (بازنویسی دقیق — فقط فحش‌های واقعاً بد) ───────────
+# ─────────── فحش ───────────
 def _normalize_persian(text):
     t = str(text).lower()
     t = t.replace('ك', 'ک').replace('ي', 'ی').replace('ۀ', 'ه').replace('ة', 'ه')
@@ -419,54 +413,35 @@ def _normalize_persian(text):
     return t
 
 
-# ── ریشه‌های پرخطر (چندحرفی — امن برای substring) ──
 _PROFANITY_ROOTS = [
-    # کیر ترکیبات
     "کیرکش", "کیرخور", "کیرمغز", "کیرخوار",
-    # کص ترکیبات
     "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "کسخور", "کصشر", "کسشر",
-    # کون ترکیبات
     "کونکش", "کونخور", "کونده",
-    # توهین‌های سنگین
     "خارکصه", "خارکصده", "خارکسده",
     "جنده", "جاکش",
     "دیوث",
     "حرومزاد", "حرومزادگی",
     "بیناموس",
     "پدرسوخته", "مادرسوخته",
-    "لاشی", "لاشخور", "لاشخور",
+    "لاشی", "لاشخور",
     "کثافت", "قرمساق", "پفیوز",
 ]
 
-# ── ریشه‌های کوتاه (فقط ابتدای کلمه — با حذف کلمات امن) ──
 _PROFANITY_PREFIXES = [
-    "کیر",   # کیر، کیرم، کیرت، کیرش، کیرمو، کیرتو
-    "کص",    # کص، کصم، کصت، کصش، کصمو، کصتو
-    "کون",   # کون، کونم، کونت، کونش، کونمو
-    "گوه",   # گوه، گوه خور
-    "گه",    # گه (shit)
-    "شاش",   # شاش (piss)
+    "کیر", "کص", "کون", "گوه", "شاش",
 ]
 
-# ── کلمات امن — ریشه رو دارن ولی فحش نیستن ──
 _SAFE_WORDS = {
-    # کیر
     "کیرلا", "کیرالا", "کیروان", "کیرل", "کیرو", "کیرا", "کیرست",
     "شاکیرا", "شکیرا", "الکیر",
-    # کص (خیلی کم)
-    # کون
     "کونگ", "کونگفو", "کونکورد", "کونگور", "کونوی", "کونان",
     "کونسول", "کونسولی", "کونفرانس", "کونترات", "کونترال",
     "کونیا", "کونیاک", "کونیفر",
-    # گوه
     "گوهر", "گوهری", "گوهردشت", "گهر", "گوهران",
-    # گه
-    "گهگاه", "گهواره", "گهر", "گهی", "گهنم",
-    # شاش
-    "شاشه", "شاشیه", "شاشیدم",  # شاشیدم is profanity but include to avoid double catch
+    "گهگاه", "گهواره", "گهی", "گهنم",
+    "شاشه", "شاشیه",
 }
 
-# ── فحش‌های انگلیسی ──
 _PROFANITY_EN = re.compile(
     r'\b(?:fuck|f\*ck|fucking|fucker|motherfucker|shit|bullshit|'
     r'bitch|asshole|dickhead|pussy|cunt|whore|slut|bastard|wanker)\b',
@@ -475,14 +450,11 @@ _PROFANITY_EN = re.compile(
 
 
 def _word_is_profanity(w):
-    """بررسی یک توکن — آیا فحش هست؟"""
     if w in _SAFE_WORDS:
         return False
-    # substring roots
     for root in _PROFANITY_ROOTS:
         if root in w:
             return True
-    # prefix roots (کلمه با این شروع میشه)
     for pref in _PROFANITY_PREFIXES:
         if w.startswith(pref):
             return True
@@ -490,19 +462,10 @@ def _word_is_profanity(w):
 
 
 def contains_profanity(text):
-    """
-    تشخیص دقیق فحش:
-    - کلمات کامل با ریشه‌های قوی
-    - کلمات امن (کتاب، کسی، مادرت، احمق) هرگز flag نمیشن
-    - فحش‌های انگلیسی هم چک میشن
-    """
     if not text: return False
     raw = str(text)
-
-    # فحش انگلیسی
     if _PROFANITY_EN.search(raw):
         return True
-
     t = _normalize_persian(raw)
     words = re.findall(r'[آ-ی]+', t)
     for w in words:
@@ -825,8 +788,7 @@ async def handle_message(bot, message):
             save_data(bot_data)
         if is_group_chat(chat_id) and chat_id not in (bot_data.get("known_groups") or []):
             bot_data.setdefault("known_groups", []).append(chat_id)
-            # گروه جدید → همه قفل‌ها روشن
-            gs = get_group_settings(chat_id)
+            get_group_settings(chat_id)
             print(f"🆕 گروه جدید: {chat_id} — همه قفل‌ها فعال", flush=True)
             save_data(bot_data)
 
@@ -838,47 +800,76 @@ async def handle_message(bot, message):
 
         if sender_id and sender_id == BOT_ID_CACHE.get("id"): return
 
-        # تنظیمات گروه (local)
         settings = get_group_settings(chat_id)
-
         ui = await get_user_info(chat_id, sender_id)
         role = ui["role"]
         disp = format_user_display(ui, sender_id)
-        is_special = bot_data.get("special_users", {}).get(chat_id, {}).get(sender_id, False)
-        can_manage = (str(sender_id) == OWNER_ID) or (role == "مالک") or is_special
-        is_owner_group = (str(sender_id) == OWNER_ID) or (role == "مالک")
 
-        # فعال‌سازی
-        if not bot_is_active:
-            if clean_text in ("فعال", "فاعل"):
-                if not can_manage:
-                    if await is_actual_group_owner(chat_id, sender_id):
-                        can_manage = True
-                        is_owner_group = True
-                        role = "مالک"
-                        ui["role"] = "مالک"
-                if can_manage:
+        # ─── نقش و مجوز (بدون OWNER_ID) ───
+        group_owner = bot_data.get("group_owners", {}).get(chat_id)
+        is_registered_owner = (str(sender_id) == str(group_owner)) if group_owner else False
+        is_rubika_creator = (role == "مالک")
+        is_special = bot_data.get("special_users", {}).get(chat_id, {}).get(sender_id, False)
+        is_owner_group = is_registered_owner or is_rubika_creator
+        can_manage = is_owner_group or is_special
+
+        # ═══════════ فعال‌سازی ═══════════
+        if clean_text in ("فعال", "فاعل"):
+            if not is_rubika_creator:
+                is_rubika_creator = await is_actual_group_owner(chat_id, sender_id)
+
+            if not group_owner:
+                # اولین نفر: ثبت به عنوان مالک
+                bot_data.setdefault("group_owners", {})[chat_id] = str(sender_id)
+                save_data(bot_data)
+                if not bot_is_active:
                     bot_is_active = True
                     bot_data["bot_is_active"] = True
                     save_data(bot_data)
-                    try:
-                        await bot.send_message(chat_id=chat_id, text="✅ **BOT M4 فعال شد.**",
-                            reply_to_message_id=message.message_id)
-                    except: pass
-            return
-
-        # غیرفعال‌سازی
-        if is_owner_group and clean_text == "غیرفعال":
-            bot_is_active = False
-            bot_data["bot_is_active"] = False
-            save_data(bot_data)
-            try:
-                await bot.send_message(chat_id=chat_id, text="🛑 **BOT M4 غیرفعال شد.**",
+                await bot.send_message(chat_id=chat_id,
+                    text="✅ **BOT M4 فعال شد.**\n\n👑 **شما مالک این گروه ثبت شدید.**\n\n⚡ **BOT M4**",
                     reply_to_message_id=message.message_id)
-            except: pass
+                return
+            elif str(sender_id) == str(group_owner) or is_rubika_creator:
+                if not bot_is_active:
+                    bot_is_active = True
+                    bot_data["bot_is_active"] = True
+                    save_data(bot_data)
+                    await bot.send_message(chat_id=chat_id,
+                        text="✅ **BOT M4 فعال شد.**",
+                        reply_to_message_id=message.message_id)
+                else:
+                    await bot.send_message(chat_id=chat_id,
+                        text="ℹ️ از قبل فعال بود.",
+                        reply_to_message_id=message.message_id)
+                return
+            else:
+                await bot.send_message(chat_id=chat_id,
+                    text="⚠️ **این گروه قبلاً مالک داره.**\n\n"
+                         "🔐 فقط مالک گروه می‌تونه فعال کنه.",
+                    reply_to_message_id=message.message_id)
+                return
+
+        # ═══════════ غیرفعال‌سازی ═══════════
+        if is_owner_group and clean_text == "غیرفعال":
+            if bot_is_active:
+                bot_is_active = False
+                bot_data["bot_is_active"] = False
+                save_data(bot_data)
+                await bot.send_message(chat_id=chat_id,
+                    text="🛑 **BOT M4 غیرفعال شد.**",
+                    reply_to_message_id=message.message_id)
+            else:
+                await bot.send_message(chat_id=chat_id,
+                    text="ℹ️ از قبل غیرفعال بود.",
+                    reply_to_message_id=message.message_id)
             return
 
-        # 🎨 فونت (برای همه)
+        # ═══════════ اگر گلوبال غیرفعاله، توقف ═══════════
+        if not bot_is_active:
+            return
+
+        # ═══════════ 🎨 فونت (برای همه) ═══════════
         font_match = re.match(r"^(?:فونت|فوت)\s+([\s\S]+)$", raw_text.strip())
         if font_match:
             font_text = font_match.group(1).strip()
@@ -895,16 +886,14 @@ async def handle_message(bot, message):
         if clean_text in ("فونت", "فوت"):
             try:
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                    text=f"🎨 **فونت‌ساز BOT M4**\n\n"
-                         f"📝 مثال: `فونت Ali`\n\n"
-                         f"⚡ **BOT M4**")
+                    text="🎨 **فونت‌ساز BOT M4**\n\n📝 مثال: `فونت Ali`\n\n⚡ **BOT M4**")
             except: pass
             return
 
-        # دستورات مدیریتی
+        # ═══════════ دستورات مدیریتی ═══════════
         if can_manage:
-            # ویژه
-            if clean_text in ("ویژه", "ادمین"):
+            # ویژه (فقط مالک گروه)
+            if is_owner_group and clean_text in ("ویژه", "ادمین"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -913,10 +902,6 @@ async def handle_message(bot, message):
                 if str(tgt) == str(sender_id):
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                         text="⚠️ نمی‌توانید به خودتان ویژه بدهید.")
-                    return
-                if str(tgt) == OWNER_ID:
-                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text="ℹ️ مالک ربات از قبل همه‌کاره است.")
                     return
                 specials = bot_data.setdefault("special_users", {}).setdefault(chat_id, {})
                 if specials.get(str(tgt), False):
@@ -932,8 +917,8 @@ async def handle_message(bot, message):
                          f"🔓 برای لغو: `حذف ویژه` (ریپلای)\n\n⚡ **BOT M4**")
                 return
 
-            # حذف ویژه
-            if clean_text in ("حذف ویژه", "لغو ویژه"):
+            # حذف ویژه (فقط مالک گروه)
+            if is_owner_group and clean_text in ("حذف ویژه", "لغو ویژه"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -974,6 +959,7 @@ async def handle_message(bot, message):
                 def ft(v): return "🟢 فعال" if v else "🔴 غیرفعال"
                 specials = bot_data.get("special_users", {}).get(chat_id, {})
                 special_count = sum(1 for v in specials.values() if v)
+                owner_name = get_display_for_user(group_owner) if group_owner else "ثبت نشده"
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
                     "📋 **لیست قفل‌ها**\n"
                     "━━━━━━━━━━━━━━━━━━━\n\n"
@@ -983,7 +969,8 @@ async def handle_message(bot, message):
                     f"🤬 **فحش:** {st(settings.get('profanity', True))}\n"
                     f"🎁 **کد هنگی:** {st(settings.get('kodhengi', True))}\n\n"
                     f"👋 **خوش‌آمدگویی:** {ft(settings.get('welcome', True))}\n"
-                    f"⭐ **کاربران ویژه:** {special_count}\n\n"
+                    f"⭐ **کاربران ویژه:** {special_count}\n"
+                    f"👑 **مالک گروه:** {owner_name}\n\n"
                     "⚡ **BOT M4**"))
                 return
 
@@ -991,8 +978,7 @@ async def handle_message(bot, message):
             for _w in ("خوش آمدگویی", "خوش‌آمدگویی", "خوشامد گویی", "خوشامدگویی"):
                 res = match_two_word_cmd(clean_text, _w)
                 if res is not None:
-                    settings["welcome"] = res
-                    save_data(bot_data)
+                    set_lock(chat_id, "welcome", res)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                         text=f"✅ **خوش‌آمدگویی** {'🟢 فعال' if res else '🔴 غیرفعال'} شد.\n\n⚡ **BOT M4**")
                     return
@@ -1041,7 +1027,7 @@ async def handle_message(bot, message):
                     "├ `کد هنگی قفل` / `کد هنگی باز`\n"
                     "├ `خوش آمدگویی قفل` / `خوش آمدگویی باز`\n"
                     "└ `لیست قفل`\n\n"
-                    "⭐ **ویژه:**\n"
+                    "⭐ **ویژه (فقط مالک):**\n"
                     "├ `ویژه` (ریپلای)\n"
                     "└ `حذف ویژه` (ریپلای)\n\n"
                     "👋 **خوش‌آمدگویی:**\n"
@@ -1058,7 +1044,7 @@ async def handle_message(bot, message):
                     "⚡ **BOT M4**"))
                 return
 
-        # ═══════ بررسی تخلف — فقط حذف ═══════
+        # ═══════════ بررسی تخلف — فقط حذف ═══════════
         if not can_manage:
             violation = None
             if settings.get("id") and contains_id(raw_text):
@@ -1081,7 +1067,7 @@ async def handle_message(bot, message):
                     print(f"⚠️ delete {violation}: {e}", flush=True)
                 return
 
-        # خوش‌آمدگویی
+        # ═══════════ خوش‌آمدگویی ═══════════
         if settings.get("welcome", True) and not can_manage:
             welcomed = bot_data.get("welcomed_users", {}).get(chat_id, {})
             if sender_id not in welcomed:
@@ -1096,7 +1082,7 @@ async def handle_message(bot, message):
 
         games = get_games()
 
-        # حل شیر یا خط
+        # شیر یا خط
         if chat_id in coin_flip_games:
             cf = coin_flip_games[chat_id]
             if str(sender_id) == cf["player"] and raw_text.strip() in ("شیر", "خط"):
@@ -1114,7 +1100,6 @@ async def handle_message(bot, message):
                     reply_to_message_id=message.message_id)
                 return
 
-        # شروع شیر یا خط
         if clean_text in ("بازی شیر یا خط", "شیر یا خط", "شیریا خط"):
             if chat_id in coin_flip_games:
                 cf = coin_flip_games[chat_id]
@@ -1139,7 +1124,7 @@ async def handle_message(bot, message):
                 f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **BOT M4**"))
             return
 
-        # شروع دوز
+        # دوز
         game_match = re.match(r"^(دوز|بازی دوز)\s*(قرمز|زرد)?$", clean_text)
         if game_match:
             if chat_id in games and games[chat_id].get("status") in ("waiting", "playing"):
@@ -1180,7 +1165,7 @@ async def handle_message(bot, message):
                 f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **BOT M4**"))
             return
 
-        # شرکت در دوز
+        # شرکت
         if clean_text in ("شرکت", "join"):
             if chat_id not in games:
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -1227,7 +1212,7 @@ async def handle_message(bot, message):
                     return
             return
 
-        # حرکت در دوز
+        # حرکت دوز
         if chat_id in games and games[chat_id].get("status") == "playing":
             g = games[chat_id]
             if sender_id in (g["player1"], g["player2"]):
@@ -1298,9 +1283,9 @@ async def cleanup_task():
 
 # ═══════════════════ main ═══════════════════
 async def main():
-    print("⚡ BOT M4 v3.1 STARTING...", flush=True)
-    print(f"👑 OWNER: {OWNER_ID}", flush=True)
+    print("⚡ BOT M4 v3.2 STARTING...", flush=True)
     print("🔒 Locks: link, id, spam, profanity, kodhengi (ALL ON)", flush=True)
+    print("👑 Owner System: per-group (first 'فعال' = owner)", flush=True)
     print("⭐ Features: Special users, Welcome, Font, Games", flush=True)
     print(f"⚙️  Bot Active: {bot_is_active}", flush=True)
     try: asyncio.create_task(cleanup_task())
