@@ -9,11 +9,7 @@ from datetime import datetime, timedelta, timezone
 from rubka import Robot, Message
 
 # ═════════════════════════════════════════════════════════════
-# FLUXBOT MINIMAL v2
-# قفل‌ها: اسپم، لینک، آیدی، کد هنگی، فحش
-# بازی‌ها: دوز (چهار مهره) + شیر یا خط
-# خوش‌آمدگویی: فعال/غیرفعال/تنظیم/نمایش
-# اخطار: فقط حذف — بدون ثبت/کیک/پیام
+# FLUXBOT v3 — Special Users + Fixed Profanity + Fixed Long Message
 # ═════════════════════════════════════════════════════════════
 
 TOKEN = os.getenv("RUBIKA_TOKEN", "").strip()
@@ -25,8 +21,10 @@ OWNER_ID = "u0KUJo1004f46bafc48e536f282693b6"
 BOT_ID_CACHE = {"id": None}
 IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
 
+
 def get_local_now():
     return datetime.now(IRAN_TZ)
+
 
 DATA_PATHS = [
     "/data/bot_data.json", "/app/data/bot_data.json",
@@ -82,8 +80,9 @@ _DEFAULT_SETTINGS = {
 }
 _DEFAULT_DATA = {
     "settings": {}, "started_users": [], "known_groups": [], "known_users": {},
-    "group_locks": {}, "temp_locks": {}, "custom_welcome": {}, "welcomed_users": {},
+    "custom_welcome": {}, "welcomed_users": {},
     "games": {}, "bot_is_active": False,
+    "special_users": {},
 }
 
 bot_data = _read_json(DATA_PATHS, {})
@@ -114,6 +113,12 @@ SPAM_WINDOW = 5
 SPAM_LIMIT = 5
 EMPTY, RED, YELLOW = "⚫", "🔴", "🟡"
 
+# آستانه‌های پیام طولانی (کد هنگی)
+KODHENGI_MAX_LEN = 1500
+KODHENGI_MAX_SAME_CHAR = 30
+KODHENGI_MAX_LINES = 100
+KODHENGI_MAX_LINE_LEN = 500
+
 username_cache = {}
 username_cache_ttl = {}
 spam_tracker = {}
@@ -132,7 +137,6 @@ FILTER_OFF = {_strip_zwnj(w) for w in {"غیرفعال", "خاموش", "باز",
 
 
 def match_two_word_cmd(text, word):
-    """دستور دوکلمه‌ای — ترتیب آزاد، ZWNJ و علائم نادیده گرفته میشن"""
     if not text: return None
     t = text.replace('\u200c', ' ').replace('\u200d', ' ')
     parts = [_strip_zwnj(p) for p in t.strip().split() if p.strip()]
@@ -181,6 +185,78 @@ def extract_msg_id(result):
         elif hasattr(result, "message_id"):
             return str(result.message_id)
     except: pass
+    return None
+
+
+# ═══════════════════ reply target finder ═══════════════════
+def extract_reply_info(message):
+    """استخراج sender_id و reply_id از پیام"""
+    result = {"reply_id": None, "sender_id": None}
+    try:
+        rt = (getattr(message, 'reply_to_message', None) or
+              getattr(message, 'reply_message', None) or
+              getattr(message, 'reply_to', None))
+        if rt:
+            if isinstance(rt, dict):
+                mid = rt.get("message_id") or rt.get("messageId")
+                if mid: result["reply_id"] = str(mid)
+                sid = rt.get("sender_id") or rt.get("user_id") or rt.get("from_id")
+                if not sid and isinstance(rt.get("sender"), dict):
+                    sid = rt["sender"].get("id") or rt["sender"].get("user_id")
+                if not sid and isinstance(rt.get("from"), dict):
+                    sid = rt["from"].get("id") or rt["from"].get("user_id")
+                if sid: result["sender_id"] = str(sid)
+            else:
+                mid = getattr(rt, "message_id", None) or getattr(rt, "messageId", None)
+                if mid: result["reply_id"] = str(mid)
+                sid = (getattr(rt, "sender_id", None) or
+                       getattr(rt, "user_id", None) or
+                       getattr(rt, "from_id", None))
+                if not sid:
+                    for _attr in ("sender", "from_user", "from", "user"):
+                        sender = getattr(rt, _attr, None)
+                        if sender:
+                            if isinstance(sender, dict):
+                                sid = sender.get("id") or sender.get("user_id")
+                            else:
+                                sid = getattr(sender, "id", None) or getattr(sender, "user_id", None)
+                            if sid: break
+                if sid: result["sender_id"] = str(sid)
+    except Exception as e:
+        print(f"⚠️ reply parse: {e}", flush=True)
+
+    if not result["reply_id"]:
+        for attr in ('reply_to_message_id', 'reply_message_id', 'reply_id'):
+            try:
+                val = getattr(message, attr, None)
+                if val:
+                    if hasattr(val, 'message_id'):
+                        result["reply_id"] = str(val.message_id)
+                    else:
+                        result["reply_id"] = str(val)
+                    break
+            except: pass
+    return result
+
+
+async def find_reply_target(message, chat_id):
+    """گرفتن sender_id کاربری که بهش ریپلای شده"""
+    info = extract_reply_info(message)
+    if info["sender_id"] and info["sender_id"] not in ("", "None", "none", "null", "0"):
+        return info["sender_id"]
+    if info["reply_id"] and chat_id:
+        try:
+            msg = await bot.get_message(chat_id=chat_id, message_id=info["reply_id"])
+            if msg:
+                if isinstance(msg, dict):
+                    d = msg.get('data', msg)
+                    m = d.get('message', d) if isinstance(d, dict) else {}
+                    sid = m.get('sender_id') or m.get('user_id') or m.get('from_id')
+                    if sid: return str(sid)
+                elif hasattr(msg, 'sender_id'):
+                    return str(msg.sender_id)
+        except Exception as e:
+            print(f"⚠️ find_reply: {e}", flush=True)
     return None
 
 
@@ -257,7 +333,6 @@ def format_user_display(ui, uid):
 
 
 async def is_actual_group_owner(chat_id, sender_id):
-    """Fallback: چک میکنه کاربر از طریق chat_info مالک هست یا نه"""
     try:
         info = await bot.get_chat_info(chat_id)
         if not isinstance(info, dict): return False
@@ -295,75 +370,101 @@ def contains_id(text):
     return False
 
 
+# ─────────── کد هنگی (پیام طولانی/هنگ‌کننده) ───────────
 def contains_kodhengi(text):
-    """قفل کد هنگی / کدهنگی / کد هکی / کدهکی"""
+    """
+    تشخیص پیام‌های طولانی یا هنگ‌کننده:
+    - متن بیشتر از ۱۵۰۰ کاراکتر
+    - تکرار یک کاراکتر ۳۰+ بار پشت هم (a...، !!!...، 😂😂😂...)
+    - بیشتر از ۱۰۰ خط
+    - یک خط بیشتر از ۵۰۰ کاراکتر
+    """
     if not text: return False
-    n = str(text).replace('\u200c', '').replace('\u200d', '').lower()
-    return bool(re.search(r'کد[\s\-_]*هنگی|کد[\s\-_]*هکی', n))
+    s = str(text)
+    if len(s) > KODHENGI_MAX_LEN:
+        return True
+    if re.search(r'(.)\1{' + str(KODHENGI_MAX_SAME_CHAR) + r',}', s, re.DOTALL):
+        return True
+    if s.count('\n') > KODHENGI_MAX_LINES:
+        return True
+    for line in s.split('\n'):
+        if len(line) > KODHENGI_MAX_LINE_LEN:
+            return True
+    return False
 
 
-# ─────────────────── profanity (rewritten, precise) ───────────────────
-# فقط فحش‌های واقعاً بد — بدون کلمات عادی مثل «مادرت»، «پدرت»، «احمق»
+# ─────────── فحش (بازنویسی دقیق) ───────────
+def _normalize_persian(text):
+    """نرمال‌سازی: یکسان‌سازی ی/ک، حذف اعراب، حذف ZWNJ"""
+    t = str(text).lower()
+    t = t.replace('ك', 'ک').replace('ي', 'ی').replace('ۀ', 'ه').replace('ة', 'ه')
+    t = re.sub(r'[\u064B-\u0652]', '', t)
+    t = t.replace('\u200c', '').replace('\u200d', '')
+    return t
+
+
+# فحش‌های خیلی بد — تطبیق کامل کلمه (بالاترین دقت)
 _PROFANITY_EXACT = {
-    # ریشه‌های اصلی (کوتاه — فقط تطبیق کامل کلمه)
     "کیر", "کص", "کون",
-    # اشکال رایج با پسوند
-    "کیرم", "کیرت", "کیرش", "کیرتو", "کیرمو",
+    "کیرم", "کیرت", "کیرش", "کیرتو", "کیرمو", "کیرمو", "کیرمو",
     "کصم", "کصت", "کصش", "کصتو", "کصمو",
     "کونم", "کونت", "کونش", "کونتو", "کونمو",
-    # ترکیبات
-    "کیرکش", "کیرخور", "کیرمغز",
+    "کیرکش", "کیرخور", "کیرمغز", "کیرخور",
     "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "خارکصه", "خارکصده",
-    "کونکش", "کونخور", "کونی", "کونده",
-    # توهین‌های سنگین
-    "جنده", "جاکش", "حرومزاده", "حرومزاد",
+    "کونکش", "کونخور", "کونی", "کونده", "کونیا",
+    "جنده", "جاکش", "حرومزاده", "حرومزاد", "حرومزادگی",
     "دیوث", "دیوثه", "بیناموس", "بیناموست",
     "پدرسوخته", "مادرسوخته", "لاشی", "لاشخور",
     "کثافت", "قرمساق", "پفیوز",
 }
 
-_PROFANITY_PHRASES = {
-    "کیر تو", "کیرت تو", "کیرم تو", "کیرمو تو",
-    "کص تو", "کصت تو", "کصم تو", "کصمو تو",
-    "مادر خراب", "مادرت خراب", "مادرتو خراب",
-    "مادر جنده", "مادرت جنده", "مادرتو جنده",
-    "پدر سوخته", "مادر سوخته",
+# ریشه‌های پرخطر — تطبیق زیررشته‌ای (کلمات مرکب رو می‌گیره)
+_PROFANITY_ROOTS = {
+    "کیر", "کص", "کون",
+    "جنده", "دیوث",
+    "کیرکش", "کیرخور", "کیرمغز",
+    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "خارکصه",
+    "کونکش", "کونخور", "کونده",
+    "حرومزاد", "بیناموس",
+    "پدرسوخته", "مادرسوخته",
+    "لاشی", "لاشخور", "کثافت", "قرمساق", "پفیوز", "جاکش",
 }
 
-
-def _normalize_persian(text):
-    """نرمال‌سازی: یکسان‌سازی ی/ک عربی، حذف اعراب و ZWNJ"""
-    t = str(text).lower()
-    t = t.replace('ك', 'ک').replace('ي', 'ی').replace('ۀ', 'ه').replace('ة', 'ه')
-    t = re.sub(r'[\u064B-\u0652]', '', t)  # اعراب
-    t = t.replace('\u200c', ' ').replace('\u200d', ' ')
-    return t
+# کلمات امن که ممکنه ریشه رو داشته باشن ولی فحش نیستن
+_SAFE_WORDS = {
+    "کیرلا", "کیرل", "کیرالا",  # Kerala
+    "کونگ", "کونگفو", "کونگف", "کونیا", "کونکورد", "کونگور", "کونانی",
+    "کسب", "کسبوکار", "کسبو", "واکسن", "تاکسی", "اکسیر", "اکس", "کسری",
+    "کسی", "کسان", "کسانی", "چکسی", "هرکسی", "همکسی", "هیچکسی",
+    "کتاب", "کنکور", "کانون",
+    "کیرو",  # اسم خاص
+}
 
 
 def contains_profanity(text):
     """
-    تشخیص فحش با دقت بالا:
-    - کلمات کوتاه (کیر، کص، کون) فقط با تطبیق کامل کلمه
-    - کلمات بلندتر (جنده، دیوث...) با تطبیق کامل کلمه هم
-    - عبارات ترکیبی با حذف فاصله
-    - هیچ‌گاه «مادرت»، «پدرت»، «احمق»، «یکصد» را اشتباهاً نمی‌گیرد
+    تشخیص فحش دقیق:
+    1. تطبیق کامل کلمه با لیست دقیق
+    2. تطبیق زیررشته‌ای برای ریشه‌های پرخطر (به‌جز کلمات امن)
+    هیچ‌گاه کلمات عادی مثل «کتاب»، «کسی»، «مادرت»، «احمق» را نمی‌گیرد.
     """
     if not text: return False
     t = _normalize_persian(text)
-    words = re.findall(r'[آ-ی]+', t)
-    if not words: return False
+    tokens = re.findall(r'[آ-ی]+', t)
+    if not tokens: return False
 
-    # تطبیق کلمه‌ی کامل
-    for w in words:
-        if w in _PROFANITY_EXACT:
+    # مرحله ۱: تطبیق کامل
+    for tok in tokens:
+        if tok in _PROFANITY_EXACT:
             return True
 
-    # تطبیق عبارات (با حذف فاصله)
-    joined = ''.join(words)
-    for p in _PROFANITY_PHRASES:
-        p_clean = re.sub(r'[^آ-ی]', '', _normalize_persian(p))
-        if p_clean and p_clean in joined:
-            return True
+    # مرحله ۲: زیررشته‌ای برای ریشه‌های قوی
+    for tok in tokens:
+        if tok in _SAFE_WORDS:
+            continue
+        for root in _PROFANITY_ROOTS:
+            if root in tok:
+                return True
 
     return False
 
@@ -373,19 +474,6 @@ def set_lock(key, value):
     settings[key] = bool(value)
     bot_data["settings"] = settings
     save_data(bot_data)
-
-
-def is_group_locked(chat_id):
-    if bot_data.get("group_locks", {}).get(chat_id):
-        return True
-    tl = bot_data.get("temp_locks", {}).get(chat_id)
-    if tl:
-        try:
-            if time.time() < float(tl): return True
-            del bot_data["temp_locks"][chat_id]
-            save_data(bot_data)
-        except: pass
-    return False
 
 
 def get_welcome_text(chat_id, chat_name, display_name):
@@ -420,7 +508,6 @@ async def get_chat_name(chat_id):
 
 # ═══════════════════ spam ═══════════════════
 async def handle_spam_check(chat_id, sender_id, msg_id):
-    """۵ پیام در ۵ ثانیه → همه پاک شن. پیام بدون جواب/اخطار."""
     now = time.time()
     spam_tracker.setdefault(chat_id, {}).setdefault(sender_id, [])
     bucket = spam_tracker[chat_id][sender_id]
@@ -545,18 +632,21 @@ async def handle_message(bot, message):
 
         if sender_id and sender_id == BOT_ID_CACHE.get("id"): return
 
+        # ═══════ نقش و مجوز ═══════
         ui = await get_user_info(chat_id, sender_id)
         role = ui["role"]
         disp = format_user_display(ui, sender_id)
-        can_manage = (str(sender_id) == OWNER_ID) or (role == "مالک")
+        is_special = bot_data.get("special_users", {}).get(chat_id, {}).get(sender_id, False)
+        can_manage = (str(sender_id) == OWNER_ID) or (role == "مالک") or is_special
+        is_owner_group = (str(sender_id) == OWNER_ID) or (role == "مالک")
 
         # ═══════ فعال‌سازی ═══════
         if not bot_is_active:
             if clean_text in ("فعال", "فاعل"):
-                # fallback: چک مالکیت از chat_info اگه نقش تشخیص داده نشد
                 if not can_manage:
                     if await is_actual_group_owner(chat_id, sender_id):
                         can_manage = True
+                        is_owner_group = True
                         role = "مالک"
                         ui["role"] = "مالک"
                 if can_manage:
@@ -570,7 +660,7 @@ async def handle_message(bot, message):
             return
 
         # ═══════ غیرفعال‌سازی ═══════
-        if can_manage and clean_text == "غیرفعال":
+        if is_owner_group and clean_text == "غیرفعال":
             bot_is_active = False
             bot_data["bot_is_active"] = False
             save_data(bot_data)
@@ -580,47 +670,59 @@ async def handle_message(bot, message):
             except: pass
             return
 
-        # ═══════ قفل گروه ═══════
-        if is_group_locked(chat_id) and not can_manage:
-            try: await bot.delete_message(chat_id=chat_id, message_id=message.message_id)
-            except: pass
-            return
-
         # ═══════ دستورات مدیریتی ═══════
         if can_manage:
-            # قفل گروه
-            if _strip_zwnj(clean_text) in ("قفلگروه", "قفلگرو") or clean_text in ("قفل گروه",):
-                bot_data.setdefault("group_locks", {})[chat_id] = True
+            # ─── ویژه / ادمین ───
+            if clean_text in ("ویژه", "ادمین"):
+                tgt = await find_reply_target(message, chat_id)
+                if not tgt:
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="⚠️ برای ویژه کردن، روی پیام کاربر ریپلای کنید و بنویسید `ویژه`.")
+                    return
+                if str(tgt) == str(sender_id):
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="⚠️ نمی‌توانید به خودتان ویژه بدهید.")
+                    return
+                if str(tgt) == OWNER_ID:
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="ℹ️ مالک ربات از قبل همه‌کاره است.")
+                    return
+                specials = bot_data.setdefault("special_users", {}).setdefault(chat_id, {})
+                if specials.get(str(tgt), False):
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="ℹ️ این کاربر از قبل ویژه است.")
+                    return
+                specials[str(tgt)] = True
                 save_data(bot_data)
-                await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                    text="🔒 **گروه قفل شد!**\n\n🔓 باز کردن: `باز`\n\n⚡ **FLUXBOT**")
+                try:
+                    _name = get_display_for_user(tgt)
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text=f"⭐ **{_name} ویژه شد!**\n\n"
+                             f"✅ حالا می‌تونه تمام دستورات مدیریتی رو اجرا کنه.\n\n"
+                             f"🔓 برای لغو: روی پیامش ریپلای کنید و بنویسید `حذف ویژه`\n\n⚡ **FLUXBOT**")
+                except Exception as e:
+                    print(f"⚠️ ویژه: {e}", flush=True)
                 return
 
-            if clean_text in ("باز", "بازکردن"):
-                had = False
-                if bot_data.get("group_locks", {}).get(chat_id):
-                    bot_data["group_locks"][chat_id] = False; had = True
-                if chat_id in bot_data.get("temp_locks", {}):
-                    del bot_data["temp_locks"][chat_id]; had = True
-                if had: save_data(bot_data)
-                await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                    text="🔓 **گروه باز شد!**" if had else "ℹ️ از قبل باز بود.")
-                return
-
-            tm = re.match(r"^قفل\s+(\d+)$", clean_text)
-            if tm:
-                h = int(tm.group(1))
-                if 0 < h <= 168:
-                    et = time.time() + h * 3600
-                    bot_data.setdefault("temp_locks", {})[chat_id] = et
-                    bot_data.setdefault("group_locks", {})[chat_id] = False
+            # ─── حذف ویژه ───
+            if clean_text in ("حذف ویژه", "لغو ویژه"):
+                tgt = await find_reply_target(message, chat_id)
+                if not tgt:
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="⚠️ برای حذف ویژه، روی پیام کاربر ریپلای کنید.")
+                    return
+                specials = bot_data.get("special_users", {}).get(chat_id, {})
+                if str(tgt) in specials:
+                    del specials[str(tgt)]
                     save_data(bot_data)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text=f"🔒 **قفل موقت {h} ساعت**\n"
-                             f"🕐 پایان: {datetime.fromtimestamp(et, tz=IRAN_TZ).strftime('%H:%M - %Y/%m/%d')}")
+                        text="✅ **کاربر از ویژه خارج شد.**")
+                else:
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text="ℹ️ این کاربر ویژه نبود.")
                 return
 
-            # قفل‌های محتوا
+            # ─── قفل‌های محتوا ───
             lock_cmds = {
                 "لینک": "link",
                 "آیدی": "id",
@@ -638,11 +740,12 @@ async def handle_message(bot, message):
                         text=f"{state} **{word}** شد.\n\n⚡ **FLUXBOT**")
                     return
 
-            # لیست قفل
+            # ─── لیست قفل ───
             if clean_text == "لیست قفل":
                 def st(v): return "🔴 بسته" if v else "🟢 باز"
                 def ft(v): return "🟢 فعال" if v else "🔴 غیرفعال"
-                gs = "🔴 بسته" if is_group_locked(chat_id) else "🟢 باز"
+                specials = bot_data.get("special_users", {}).get(chat_id, {})
+                special_count = sum(1 for v in specials.values() if v)
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
                     "📋 **لیست قفل‌ها**\n"
                     "━━━━━━━━━━━━━━━━━━━\n\n"
@@ -652,11 +755,11 @@ async def handle_message(bot, message):
                     f"🤬 **فحش:** {st(settings['profanity'])}\n"
                     f"🎁 **کد هنگی:** {st(settings['kodhengi'])}\n\n"
                     f"👋 **خوش‌آمدگویی:** {ft(settings.get('welcome', True))}\n"
-                    f"🔒 **قفل گروه:** {gs}\n\n"
+                    f"⭐ **کاربران ویژه:** {special_count}\n\n"
                     "⚡ **FLUXBOT**"))
                 return
 
-            # خوش‌آمدگویی
+            # ─── خوش‌آمدگویی ───
             for _w in ("خوش آمدگویی", "خوش‌آمدگویی", "خوشامد گویی", "خوشامدگویی"):
                 res = match_two_word_cmd(clean_text, _w)
                 if res is not None:
@@ -698,7 +801,7 @@ async def handle_message(bot, message):
                         text="ℹ️ پیام پیش‌فرض فعال است.")
                 return
 
-            # کمک
+            # ─── راهنما ───
             if clean_text in ("راهنما", "کمک", "help"):
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
                     "📚 **راهنمای FLUXBOT**\n"
@@ -708,9 +811,12 @@ async def handle_message(bot, message):
                     "├ `آیدی قفل` / `آیدی باز`\n"
                     "├ `اسپم قفل` / `اسپم باز`\n"
                     "├ `فحش قفل` / `فحش باز`\n"
-                    "├ `کد هنگی قفل` / `کد هنگی باز`\n"
+                    "├ `کد هنگی قفل` / `کد هنگی باز` (پیام‌های طولانی)\n"
                     "├ `خوش آمدگویی قفل` / `خوش آمدگویی باز`\n"
                     "└ `لیست قفل`\n\n"
+                    "⭐ **ویژه:**\n"
+                    "├ `ویژه` (ریپلای روی کاربر)\n"
+                    "└ `حذف ویژه` (ریپلای روی کاربر)\n\n"
                     "👋 **خوش‌آمدگویی:**\n"
                     "├ `تنظیم پیام خوش آمدگویی [متن]`\n"
                     "├ `نمایش پیام خوش آمدگویی`\n"
@@ -720,9 +826,6 @@ async def handle_message(bot, message):
                     "├ `شرکت` → پیوستن\n"
                     "├ `1` تا `7` → ستون\n"
                     "└ `بازی شیر یا خط`\n\n"
-                    "🔒 **گروه:**\n"
-                    "├ `قفلگروه` / `باز`\n"
-                    "└ `قفل [ساعت]` → قفل موقت\n\n"
                     "⚡ **FLUXBOT**"))
                 return
 
@@ -883,7 +986,7 @@ async def handle_message(bot, message):
                 f"📌 عدد 1 تا 7 بفرست.\n\n⚡ **FLUXBOT**"))
             return
 
-        # ═══════ انصراف (هر دو بازی) ═══════
+        # ═══════ انصراف ═══════
         if clean_text in ("انصراف", "لغو"):
             if chat_id in coin_flip_games and sender_id == coin_flip_games[chat_id]["player"]:
                 del coin_flip_games[chat_id]
@@ -958,7 +1061,6 @@ async def cleanup_task():
                 if exp <= now:
                     username_cache_ttl.pop(k, None)
                     username_cache.pop(k, None)
-            # پاکسازی spam_tracker قدیمی
             for cid, users in list(spam_tracker.items()):
                 for uid, entries in list(users.items()):
                     entries[:] = [e for e in entries if now - e["t"] < 60]
@@ -971,9 +1073,10 @@ async def cleanup_task():
 
 # ═══════════════════ main ═══════════════════
 async def main():
-    print("🤖 FLUXBOT MINIMAL v2 STARTING...", flush=True)
+    print("🤖 FLUXBOT v3 STARTING...", flush=True)
     print(f"👑 OWNER: {OWNER_ID}", flush=True)
     print("🔒 Locks: link, id, spam, profanity, kodhengi", flush=True)
+    print("⭐ Features: Special users, Welcome", flush=True)
     print("🎮 Games: Connect4 + Coin Flip", flush=True)
     print(f"⚙️  Bot Active: {bot_is_active}", flush=True)
     try: asyncio.create_task(cleanup_task())
