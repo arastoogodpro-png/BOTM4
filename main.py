@@ -5,11 +5,14 @@ import time
 import random
 import asyncio
 import traceback
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from rubka import Robot, Message
 
 # ═════════════════════════════════════════════════════════════
-# FLUXBOT v3 — Special Users + Fixed Profanity + Fixed Long Message
+# ⚡ BOT M4 ⚡ — v3.1
+# Locks: link, id, spam, profanity, kodhengi (ALL ON by default)
+# Features: Special users, Welcome, Font, Games
 # ═════════════════════════════════════════════════════════════
 
 TOKEN = os.getenv("RUBIKA_TOKEN", "").strip()
@@ -20,6 +23,7 @@ bot = Robot(token=TOKEN)
 OWNER_ID = "u0KUJo1004f46bafc48e536f282693b6"
 BOT_ID_CACHE = {"id": None}
 IRAN_TZ = timezone(timedelta(hours=3, minutes=30))
+BOT_FOOTER = "⚡ **BOT M4**"
 
 
 def get_local_now():
@@ -70,19 +74,21 @@ def _write_json(paths, value):
     return False
 
 
+# ── تنظیمات پیش‌فرض: همه قفل‌ها روشن ──
 _DEFAULT_SETTINGS = {
-    "link": False,
-    "id": False,
+    "link": True,
+    "id": True,
     "spam": True,
     "profanity": True,
-    "kodhengi": False,
+    "kodhengi": True,
     "welcome": True,
 }
 _DEFAULT_DATA = {
-    "settings": {}, "started_users": [], "known_groups": [], "known_users": {},
+    "started_users": [], "known_groups": [], "known_users": {},
     "custom_welcome": {}, "welcomed_users": {},
     "games": {}, "bot_is_active": False,
     "special_users": {},
+    "group_settings": {},
 }
 
 bot_data = _read_json(DATA_PATHS, {})
@@ -90,10 +96,6 @@ if not isinstance(bot_data, dict): bot_data = {}
 for _k, _v in _DEFAULT_DATA.items():
     if _k not in bot_data or not isinstance(bot_data.get(_k), type(_v)):
         bot_data[_k] = _v.copy() if isinstance(_v, (dict, list)) else _v
-settings = bot_data["settings"]
-for _k, _v in _DEFAULT_SETTINGS.items():
-    settings.setdefault(_k, _v)
-bot_data["settings"] = settings
 bot_is_active = bool(bot_data.get("bot_is_active", False))
 
 
@@ -107,13 +109,34 @@ def save_data(data=None):
 save_data(bot_data)
 
 
+def get_group_settings(chat_id):
+    """تنظیمات مخصوص هر گروه — پیش‌فرض همه قفل‌ها روشن"""
+    gs = bot_data.setdefault("group_settings", {}).get(chat_id)
+    if not isinstance(gs, dict):
+        gs = {}
+        bot_data["group_settings"][chat_id] = gs
+    changed = False
+    for k, v in _DEFAULT_SETTINGS.items():
+        if k not in gs:
+            gs[k] = v
+            changed = True
+    if changed:
+        save_data(bot_data)
+    return gs
+
+
+def set_lock(chat_id, key, value):
+    gs = get_group_settings(chat_id)
+    gs[key] = bool(value)
+    save_data(bot_data)
+
+
 # ═══════════════════ constants ═══════════════════
 GAME_TIMEOUT = 120
 SPAM_WINDOW = 5
 SPAM_LIMIT = 5
 EMPTY, RED, YELLOW = "⚫", "🔴", "🟡"
 
-# آستانه‌های پیام طولانی (کد هنگی)
 KODHENGI_MAX_LEN = 1500
 KODHENGI_MAX_SAME_CHAR = 30
 KODHENGI_MAX_LINES = 100
@@ -190,7 +213,6 @@ def extract_msg_id(result):
 
 # ═══════════════════ reply target finder ═══════════════════
 def extract_reply_info(message):
-    """استخراج sender_id و reply_id از پیام"""
     result = {"reply_id": None, "sender_id": None}
     try:
         rt = (getattr(message, 'reply_to_message', None) or
@@ -240,7 +262,6 @@ def extract_reply_info(message):
 
 
 async def find_reply_target(message, chat_id):
-    """گرفتن sender_id کاربری که بهش ریپلای شده"""
     info = extract_reply_info(message)
     if info["sender_id"] and info["sender_id"] not in ("", "None", "none", "null", "0"):
         return info["sender_id"]
@@ -372,13 +393,6 @@ def contains_id(text):
 
 # ─────────── کد هنگی (پیام طولانی/هنگ‌کننده) ───────────
 def contains_kodhengi(text):
-    """
-    تشخیص پیام‌های طولانی یا هنگ‌کننده:
-    - متن بیشتر از ۱۵۰۰ کاراکتر
-    - تکرار یک کاراکتر ۳۰+ بار پشت هم (a...، !!!...، 😂😂😂...)
-    - بیشتر از ۱۰۰ خط
-    - یک خط بیشتر از ۵۰۰ کاراکتر
-    """
     if not text: return False
     s = str(text)
     if len(s) > KODHENGI_MAX_LEN:
@@ -390,12 +404,14 @@ def contains_kodhengi(text):
     for line in s.split('\n'):
         if len(line) > KODHENGI_MAX_LINE_LEN:
             return True
+    for w in s.split():
+        if len(w) > 200:
+            return True
     return False
 
 
-# ─────────── فحش (بازنویسی دقیق) ───────────
+# ─────────── فحش (بازنویسی دقیق — فقط فحش‌های واقعاً بد) ───────────
 def _normalize_persian(text):
-    """نرمال‌سازی: یکسان‌سازی ی/ک، حذف اعراب، حذف ZWNJ"""
     t = str(text).lower()
     t = t.replace('ك', 'ک').replace('ي', 'ی').replace('ۀ', 'ه').replace('ة', 'ه')
     t = re.sub(r'[\u064B-\u0652]', '', t)
@@ -403,79 +419,99 @@ def _normalize_persian(text):
     return t
 
 
-# فحش‌های خیلی بد — تطبیق کامل کلمه (بالاترین دقت)
-_PROFANITY_EXACT = {
-    "کیر", "کص", "کون",
-    "کیرم", "کیرت", "کیرش", "کیرتو", "کیرمو", "کیرمو", "کیرمو",
-    "کصم", "کصت", "کصش", "کصتو", "کصمو",
-    "کونم", "کونت", "کونش", "کونتو", "کونمو",
-    "کیرکش", "کیرخور", "کیرمغز", "کیرخور",
-    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "خارکصه", "خارکصده",
-    "کونکش", "کونخور", "کونی", "کونده", "کونیا",
-    "جنده", "جاکش", "حرومزاده", "حرومزاد", "حرومزادگی",
-    "دیوث", "دیوثه", "بیناموس", "بیناموست",
-    "پدرسوخته", "مادرسوخته", "لاشی", "لاشخور",
-    "کثافت", "قرمساق", "پفیوز",
-}
-
-# ریشه‌های پرخطر — تطبیق زیررشته‌ای (کلمات مرکب رو می‌گیره)
-_PROFANITY_ROOTS = {
-    "کیر", "کص", "کون",
-    "جنده", "دیوث",
-    "کیرکش", "کیرخور", "کیرمغز",
-    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "خارکصه",
+# ── ریشه‌های پرخطر (چندحرفی — امن برای substring) ──
+_PROFANITY_ROOTS = [
+    # کیر ترکیبات
+    "کیرکش", "کیرخور", "کیرمغز", "کیرخوار",
+    # کص ترکیبات
+    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "کسخور", "کصشر", "کسشر",
+    # کون ترکیبات
     "کونکش", "کونخور", "کونده",
-    "حرومزاد", "بیناموس",
+    # توهین‌های سنگین
+    "خارکصه", "خارکصده", "خارکسده",
+    "جنده", "جاکش",
+    "دیوث",
+    "حرومزاد", "حرومزادگی",
+    "بیناموس",
     "پدرسوخته", "مادرسوخته",
-    "لاشی", "لاشخور", "کثافت", "قرمساق", "پفیوز", "جاکش",
+    "لاشی", "لاشخور", "لاشخور",
+    "کثافت", "قرمساق", "پفیوز",
+]
+
+# ── ریشه‌های کوتاه (فقط ابتدای کلمه — با حذف کلمات امن) ──
+_PROFANITY_PREFIXES = [
+    "کیر",   # کیر، کیرم، کیرت، کیرش، کیرمو، کیرتو
+    "کص",    # کص، کصم، کصت، کصش، کصمو، کصتو
+    "کون",   # کون، کونم، کونت، کونش، کونمو
+    "گوه",   # گوه، گوه خور
+    "گه",    # گه (shit)
+    "شاش",   # شاش (piss)
+]
+
+# ── کلمات امن — ریشه رو دارن ولی فحش نیستن ──
+_SAFE_WORDS = {
+    # کیر
+    "کیرلا", "کیرالا", "کیروان", "کیرل", "کیرو", "کیرا", "کیرست",
+    "شاکیرا", "شکیرا", "الکیر",
+    # کص (خیلی کم)
+    # کون
+    "کونگ", "کونگفو", "کونکورد", "کونگور", "کونوی", "کونان",
+    "کونسول", "کونسولی", "کونفرانس", "کونترات", "کونترال",
+    "کونیا", "کونیاک", "کونیفر",
+    # گوه
+    "گوهر", "گوهری", "گوهردشت", "گهر", "گوهران",
+    # گه
+    "گهگاه", "گهواره", "گهر", "گهی", "گهنم",
+    # شاش
+    "شاشه", "شاشیه", "شاشیدم",  # شاشیدم is profanity but include to avoid double catch
 }
 
-# کلمات امن که ممکنه ریشه رو داشته باشن ولی فحش نیستن
-_SAFE_WORDS = {
-    "کیرلا", "کیرل", "کیرالا",  # Kerala
-    "کونگ", "کونگفو", "کونگف", "کونیا", "کونکورد", "کونگور", "کونانی",
-    "کسب", "کسبوکار", "کسبو", "واکسن", "تاکسی", "اکسیر", "اکس", "کسری",
-    "کسی", "کسان", "کسانی", "چکسی", "هرکسی", "همکسی", "هیچکسی",
-    "کتاب", "کنکور", "کانون",
-    "کیرو",  # اسم خاص
-}
+# ── فحش‌های انگلیسی ──
+_PROFANITY_EN = re.compile(
+    r'\b(?:fuck|f\*ck|fucking|fucker|motherfucker|shit|bullshit|'
+    r'bitch|asshole|dickhead|pussy|cunt|whore|slut|bastard|wanker)\b',
+    re.IGNORECASE
+)
+
+
+def _word_is_profanity(w):
+    """بررسی یک توکن — آیا فحش هست؟"""
+    if w in _SAFE_WORDS:
+        return False
+    # substring roots
+    for root in _PROFANITY_ROOTS:
+        if root in w:
+            return True
+    # prefix roots (کلمه با این شروع میشه)
+    for pref in _PROFANITY_PREFIXES:
+        if w.startswith(pref):
+            return True
+    return False
 
 
 def contains_profanity(text):
     """
-    تشخیص فحش دقیق:
-    1. تطبیق کامل کلمه با لیست دقیق
-    2. تطبیق زیررشته‌ای برای ریشه‌های پرخطر (به‌جز کلمات امن)
-    هیچ‌گاه کلمات عادی مثل «کتاب»، «کسی»، «مادرت»، «احمق» را نمی‌گیرد.
+    تشخیص دقیق فحش:
+    - کلمات کامل با ریشه‌های قوی
+    - کلمات امن (کتاب، کسی، مادرت، احمق) هرگز flag نمیشن
+    - فحش‌های انگلیسی هم چک میشن
     """
     if not text: return False
-    t = _normalize_persian(text)
-    tokens = re.findall(r'[آ-ی]+', t)
-    if not tokens: return False
+    raw = str(text)
 
-    # مرحله ۱: تطبیق کامل
-    for tok in tokens:
-        if tok in _PROFANITY_EXACT:
+    # فحش انگلیسی
+    if _PROFANITY_EN.search(raw):
+        return True
+
+    t = _normalize_persian(raw)
+    words = re.findall(r'[آ-ی]+', t)
+    for w in words:
+        if _word_is_profanity(w):
             return True
-
-    # مرحله ۲: زیررشته‌ای برای ریشه‌های قوی
-    for tok in tokens:
-        if tok in _SAFE_WORDS:
-            continue
-        for root in _PROFANITY_ROOTS:
-            if root in tok:
-                return True
-
     return False
 
 
-# ═══════════════════ state helpers ═══════════════════
-def set_lock(key, value):
-    settings[key] = bool(value)
-    bot_data["settings"] = settings
-    save_data(bot_data)
-
-
+# ═══════════════════ welcome ═══════════════════
 def get_welcome_text(chat_id, chat_name, display_name):
     custom = bot_data.get("custom_welcome", {}).get(chat_id)
     now_str = get_local_now().strftime("%H:%M - %Y/%m/%d")
@@ -483,10 +519,10 @@ def get_welcome_text(chat_id, chat_name, display_name):
         return (custom.replace("{name}", display_name)
                 .replace("{group}", chat_name).replace("{time}", now_str))
     return (
-        f"╭─━━━━━━━━━━━━━━━━━━━─╮\n   ⚡ **FLUXBOT** ⚡\n   🌊 جریان قدرت 🌊\n╰─━━━━━━━━━━━━━━━━━━━─╯\n\n"
+        f"╭─━━━━━━━━━━━━━━━━━━━─╮\n   ⚡ **BOT M4** ⚡\n   🌊 جریان قدرت 🌊\n╰─━━━━━━━━━━━━━━━━━━━─╯\n\n"
         f"🌟 **به گروه {chat_name} خوش آمدید!** 🌟\n\n"
         f"👤 **{display_name} عزیز:**\nخوشحالیم که به ما پیوستید. 🌹\n\n"
-        f"⏰ **ورود:** {now_str}\n\n⚡ **FLUXBOT**"
+        f"⏰ **ورود:** {now_str}\n\n⚡ **BOT M4**"
     )
 
 
@@ -523,6 +559,173 @@ async def handle_spam_check(chat_id, sender_id, msg_id):
         spam_tracker[chat_id][sender_id] = []
         return True
     return False
+
+
+# ═══════════════════ 🎨 FONT SYSTEM ═══════════════════
+def _has_latin(text):
+    return bool(re.search(r'[A-Za-z]', text or ""))
+
+
+def _map_unicode(text, upper_start, lower_start, digit_start=None):
+    out = []
+    for ch in text:
+        if 'A' <= ch <= 'Z':
+            out.append(chr(upper_start + ord(ch) - ord('A')))
+        elif 'a' <= ch <= 'z':
+            out.append(chr(lower_start + ord(ch) - ord('a')))
+        elif digit_start is not None and '0' <= ch <= '9':
+            out.append(chr(digit_start + ord(ch) - ord('0')))
+        else:
+            out.append(ch)
+    return ''.join(out)
+
+
+def font_bold(t): return _map_unicode(t, 0x1D400, 0x1D41A, 0x1D7CE)
+def font_italic(t):
+    r = _map_unicode(t, 0x1D434, 0x1D44E)
+    return r.replace(chr(0x1D455), "ℎ")
+def font_bold_italic(t): return _map_unicode(t, 0x1D468, 0x1D482)
+def font_bold_script(t): return _map_unicode(t, 0x1D4D0, 0x1D4EA)
+def font_bold_fraktur(t): return _map_unicode(t, 0x1D56C, 0x1D586)
+def font_sans(t): return _map_unicode(t, 0x1D5A0, 0x1D5BA, 0x1D7E2)
+def font_sans_bold(t): return _map_unicode(t, 0x1D5D4, 0x1D5EE, 0x1D7EC)
+def font_mono(t): return _map_unicode(t, 0x1D670, 0x1D68A, 0x1D7F6)
+
+
+def font_fullwidth(t):
+    out = []
+    for ch in t:
+        if 'A' <= ch <= 'Z': out.append(chr(0xFF21 + ord(ch) - ord('A')))
+        elif 'a' <= ch <= 'z': out.append(chr(0xFF41 + ord(ch) - ord('a')))
+        elif '0' <= ch <= '9': out.append(chr(0xFF10 + ord(ch) - ord('0')))
+        elif ch == ' ': out.append('\u3000')
+        else: out.append(ch)
+    return ''.join(out)
+
+
+SMALL_CAPS_MAP = {
+    'a': 'ᴀ', 'b': 'ʙ', 'c': 'ᴄ', 'd': 'ᴅ', 'e': 'ᴇ', 'f': 'ꜰ', 'g': 'ɢ',
+    'h': 'ʜ', 'i': 'ɪ', 'j': 'ᴊ', 'k': 'ᴋ', 'l': 'ʟ', 'm': 'ᴍ', 'n': 'ɴ',
+    'o': 'ᴏ', 'p': 'ᴘ', 'q': 'ǫ', 'r': 'ʀ', 's': 's', 't': 'ᴛ', 'u': 'ᴜ',
+    'v': 'ᴠ', 'w': 'ᴡ', 'x': 'x', 'y': 'ʏ', 'z': 'ᴢ',
+    'A': 'ᴀ', 'B': 'ʙ', 'C': 'ᴄ', 'D': 'ᴅ', 'E': 'ᴇ', 'F': 'ꜰ', 'G': 'ɢ',
+    'H': 'ʜ', 'I': 'ɪ', 'J': 'ᴊ', 'K': 'ᴋ', 'L': 'ʟ', 'M': 'ᴍ', 'N': 'ɴ',
+    'O': 'ᴏ', 'P': 'ᴘ', 'Q': 'ǫ', 'R': 'ʀ', 'S': 's', 'T': 'ᴛ', 'U': 'ᴜ',
+    'V': 'ᴠ', 'W': 'ᴡ', 'X': 'x', 'Y': 'ʏ', 'Z': 'ᴢ',
+}
+
+
+def font_small_caps(t): return ''.join(SMALL_CAPS_MAP.get(ch, ch) for ch in t)
+def deco_strike(t): return ''.join(ch + '\u0336' for ch in t)
+def deco_underline(t): return ''.join(ch + '\u0332' for ch in t)
+def deco_overline(t): return ''.join(ch + '\u0305' for ch in t)
+def deco_double_under(t): return ''.join(ch + '\u0333' for ch in t)
+def deco_slash(t): return ''.join(ch + '\u0338' for ch in t)
+def deco_dot_above(t): return ''.join(ch + '\u0307' for ch in t)
+
+
+def _build_persian_presentation_forms():
+    forms = {}
+    for code_range in (range(0xFB50, 0xFE00), range(0xFE70, 0xFF00)):
+        for codepoint in code_range:
+            ch = chr(codepoint)
+            decomposition = unicodedata.decomposition(ch).split()
+            if len(decomposition) != 2:
+                continue
+            form_name, base_code = decomposition
+            if form_name not in ('<isolated>', '<final>', '<initial>', '<medial>'):
+                continue
+            try:
+                base = chr(int(base_code, 16))
+            except ValueError:
+                continue
+            forms.setdefault(base, {})[form_name[1:-1]] = ch
+    return forms
+
+
+_PERSIAN_PRESENTATION_FORMS = _build_persian_presentation_forms()
+
+
+def font_persian_contextual(text):
+    original_chars = list(str(text or ""))
+    chars = original_chars[:]
+    for index, ch in enumerate(original_chars):
+        current_forms = _PERSIAN_PRESENTATION_FORMS.get(ch)
+        if not current_forms:
+            continue
+        previous_forms = (
+            _PERSIAN_PRESENTATION_FORMS.get(original_chars[index - 1], {})
+            if index > 0 and original_chars[index - 1] not in ('\u200c', '\u200d') else {}
+        )
+        next_forms = (
+            _PERSIAN_PRESENTATION_FORMS.get(original_chars[index + 1], {})
+            if index + 1 < len(original_chars) and original_chars[index + 1] not in ('\u200c', '\u200d') else {}
+        )
+        joins_previous = (
+            bool(previous_forms) and
+            ('initial' in previous_forms or 'medial' in previous_forms) and
+            ('final' in current_forms or 'medial' in current_forms)
+        )
+        joins_next = (
+            bool(next_forms) and
+            ('initial' in current_forms or 'medial' in current_forms) and
+            ('final' in next_forms or 'medial' in next_forms)
+        )
+        if joins_previous and joins_next:
+            form_name = 'medial'
+        elif joins_previous:
+            form_name = 'final'
+        elif joins_next:
+            form_name = 'initial'
+        else:
+            form_name = 'isolated'
+        chars[index] = current_forms.get(form_name, current_forms.get('isolated', ch))
+    return ''.join(chars)
+
+
+def build_font_message(text):
+    text = (text or "").strip()
+    if not text:
+        return None
+    if len(text) > 12:
+        text = text[:12] + "…"
+
+    styles = []
+    if re.search(r'[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]', text):
+        styles.append(font_persian_contextual(text))
+    if _has_latin(text) or re.search(r'[0-9]', text):
+        styles.append(font_bold(text))
+        styles.append(font_italic(text))
+        styles.append(font_bold_italic(text))
+        styles.append(font_bold_script(text))
+        styles.append(font_bold_fraktur(text))
+        styles.append(font_sans(text))
+        styles.append(font_sans_bold(text))
+        styles.append(font_mono(text))
+        styles.append(font_fullwidth(text))
+        styles.append(font_small_caps(text))
+
+    styles.append(deco_strike(text))
+    styles.append(deco_underline(text))
+    styles.append(deco_overline(text))
+    styles.append(deco_double_under(text))
+    styles.append(deco_slash(text))
+    styles.append(deco_dot_above(text))
+    styles.append(f"✿ {text} ✿")
+    styles.append(f"❁ {text} ❁")
+    styles.append(f"【 {text} 】")
+    styles.append(f"「 {text} 」")
+    styles.append(f"★彡 {text} 彡★")
+    styles.append(f"༺ {text} ༻")
+    styles.append(f"•°¯`•• {text} ••´¯°•")
+    styles.append(f"▁▂▃ {text} ▃▂▁")
+    styles.append(f"彡★ {text} ★彡")
+    styles.append(f"☆ {text} ☆")
+
+    lines = [f"🎨 فونت‌ساز | {text}", ""]
+    for i, s in enumerate(styles, 1):
+        lines.append(f"{i}- {s}")
+    return "\n".join(lines)
 
 
 # ═══════════════════ Connect 4 ═══════════════════
@@ -574,7 +777,7 @@ async def game_timeout_check(chat_id, started_at):
             save_data(bot_data)
             try:
                 await bot.send_message(chat_id=chat_id,
-                    text="⏱️ **زمان بازی به پایان رسید!**\n\nکسی شرکت نکرد.\n\n⚡ **FLUXBOT**")
+                    text="⏱️ **زمان بازی به پایان رسید!**\n\nکسی شرکت نکرد.\n\n⚡ **BOT M4**")
             except: pass
     except: pass
 
@@ -587,7 +790,7 @@ async def coinflip_timeout(chat_id, started_at):
             del coin_flip_games[chat_id]
             try:
                 await bot.send_message(chat_id=chat_id,
-                    text="⏱️ **زمان انتخاب به پایان رسید!**\n\nبازی لغو شد.\n\n⚡ **FLUXBOT**")
+                    text="⏱️ **زمان انتخاب به پایان رسید!**\n\nبازی لغو شد.\n\n⚡ **BOT M4**")
             except: pass
     except: pass
 
@@ -595,7 +798,7 @@ async def coinflip_timeout(chat_id, started_at):
 # ═══════════════════ main handler ═══════════════════
 @bot.on_message()
 async def handle_message(bot, message):
-    global bot_is_active, bot_data, settings
+    global bot_is_active, bot_data
 
     try:
         chat_id = str(message.chat_id) if message.chat_id else ""
@@ -622,17 +825,22 @@ async def handle_message(bot, message):
             save_data(bot_data)
         if is_group_chat(chat_id) and chat_id not in (bot_data.get("known_groups") or []):
             bot_data.setdefault("known_groups", []).append(chat_id)
+            # گروه جدید → همه قفل‌ها روشن
+            gs = get_group_settings(chat_id)
+            print(f"🆕 گروه جدید: {chat_id} — همه قفل‌ها فعال", flush=True)
             save_data(bot_data)
 
         print(f"📩 {chat_id} | {sender_id} | {raw_text!r}", flush=True)
 
-        # ═══════ پیوی: هیچ جوابی نمیده ═══════
+        # پیوی: هیچ جوابی نمیده
         if not is_group_chat(chat_id):
             return
 
         if sender_id and sender_id == BOT_ID_CACHE.get("id"): return
 
-        # ═══════ نقش و مجوز ═══════
+        # تنظیمات گروه (local)
+        settings = get_group_settings(chat_id)
+
         ui = await get_user_info(chat_id, sender_id)
         role = ui["role"]
         disp = format_user_display(ui, sender_id)
@@ -640,7 +848,7 @@ async def handle_message(bot, message):
         can_manage = (str(sender_id) == OWNER_ID) or (role == "مالک") or is_special
         is_owner_group = (str(sender_id) == OWNER_ID) or (role == "مالک")
 
-        # ═══════ فعال‌سازی ═══════
+        # فعال‌سازی
         if not bot_is_active:
             if clean_text in ("فعال", "فاعل"):
                 if not can_manage:
@@ -654,30 +862,53 @@ async def handle_message(bot, message):
                     bot_data["bot_is_active"] = True
                     save_data(bot_data)
                     try:
-                        await bot.send_message(chat_id=chat_id, text="✅ **ربات فعال شد.**",
+                        await bot.send_message(chat_id=chat_id, text="✅ **BOT M4 فعال شد.**",
                             reply_to_message_id=message.message_id)
                     except: pass
             return
 
-        # ═══════ غیرفعال‌سازی ═══════
+        # غیرفعال‌سازی
         if is_owner_group and clean_text == "غیرفعال":
             bot_is_active = False
             bot_data["bot_is_active"] = False
             save_data(bot_data)
             try:
-                await bot.send_message(chat_id=chat_id, text="🛑 **ربات غیرفعال شد.**",
+                await bot.send_message(chat_id=chat_id, text="🛑 **BOT M4 غیرفعال شد.**",
                     reply_to_message_id=message.message_id)
             except: pass
             return
 
-        # ═══════ دستورات مدیریتی ═══════
+        # 🎨 فونت (برای همه)
+        font_match = re.match(r"^(?:فونت|فوت)\s+([\s\S]+)$", raw_text.strip())
+        if font_match:
+            font_text = font_match.group(1).strip()
+            if font_text and not contains_profanity(font_text):
+                font_msg = build_font_message(font_text)
+                if font_msg:
+                    try:
+                        await bot.send_message(chat_id=chat_id, text=font_msg,
+                            reply_to_message_id=message.message_id)
+                    except Exception as e:
+                        print(f"❌ font send: {e}", flush=True)
+            return
+
+        if clean_text in ("فونت", "فوت"):
+            try:
+                await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                    text=f"🎨 **فونت‌ساز BOT M4**\n\n"
+                         f"📝 مثال: `فونت Ali`\n\n"
+                         f"⚡ **BOT M4**")
+            except: pass
+            return
+
+        # دستورات مدیریتی
         if can_manage:
-            # ─── ویژه / ادمین ───
+            # ویژه
             if clean_text in ("ویژه", "ادمین"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text="⚠️ برای ویژه کردن، روی پیام کاربر ریپلای کنید و بنویسید `ویژه`.")
+                        text="⚠️ برای ویژه کردن، روی پیام کاربر ریپلای کنید.")
                     return
                 if str(tgt) == str(sender_id):
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -694,17 +925,14 @@ async def handle_message(bot, message):
                     return
                 specials[str(tgt)] = True
                 save_data(bot_data)
-                try:
-                    _name = get_display_for_user(tgt)
-                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text=f"⭐ **{_name} ویژه شد!**\n\n"
-                             f"✅ حالا می‌تونه تمام دستورات مدیریتی رو اجرا کنه.\n\n"
-                             f"🔓 برای لغو: روی پیامش ریپلای کنید و بنویسید `حذف ویژه`\n\n⚡ **FLUXBOT**")
-                except Exception as e:
-                    print(f"⚠️ ویژه: {e}", flush=True)
+                _name = get_display_for_user(tgt)
+                await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                    text=f"⭐ **{_name} ویژه شد!**\n\n"
+                         f"✅ حالا تمام دستورات مدیریتی رو داره.\n\n"
+                         f"🔓 برای لغو: `حذف ویژه` (ریپلای)\n\n⚡ **BOT M4**")
                 return
 
-            # ─── حذف ویژه ───
+            # حذف ویژه
             if clean_text in ("حذف ویژه", "لغو ویژه"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
@@ -716,13 +944,13 @@ async def handle_message(bot, message):
                     del specials[str(tgt)]
                     save_data(bot_data)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text="✅ **کاربر از ویژه خارج شد.**")
+                        text="✅ **کاربر از ویژه خارج شد.**\n\n⚡ **BOT M4**")
                 else:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                         text="ℹ️ این کاربر ویژه نبود.")
                 return
 
-            # ─── قفل‌های محتوا ───
+            # قفل‌ها
             lock_cmds = {
                 "لینک": "link",
                 "آیدی": "id",
@@ -734,13 +962,13 @@ async def handle_message(bot, message):
             for word, key in lock_cmds.items():
                 res = match_two_word_cmd(clean_text, word)
                 if res is not None:
-                    set_lock(key, res)
+                    set_lock(chat_id, key, res)
                     state = "🔒 قفل" if res else "🔓 باز"
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text=f"{state} **{word}** شد.\n\n⚡ **FLUXBOT**")
+                        text=f"{state} **{word}** شد.\n\n⚡ **BOT M4**")
                     return
 
-            # ─── لیست قفل ───
+            # لیست قفل
             if clean_text == "لیست قفل":
                 def st(v): return "🔴 بسته" if v else "🟢 باز"
                 def ft(v): return "🟢 فعال" if v else "🔴 غیرفعال"
@@ -749,25 +977,24 @@ async def handle_message(bot, message):
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
                     "📋 **لیست قفل‌ها**\n"
                     "━━━━━━━━━━━━━━━━━━━\n\n"
-                    f"🔗 **لینک:** {st(settings['link'])}\n"
-                    f"🆔 **آیدی:** {st(settings['id'])}\n"
-                    f"📢 **اسپم:** {st(settings['spam'])}\n"
-                    f"🤬 **فحش:** {st(settings['profanity'])}\n"
-                    f"🎁 **کد هنگی:** {st(settings['kodhengi'])}\n\n"
+                    f"🔗 **لینک:** {st(settings.get('link', True))}\n"
+                    f"🆔 **آیدی:** {st(settings.get('id', True))}\n"
+                    f"📢 **اسپم:** {st(settings.get('spam', True))}\n"
+                    f"🤬 **فحش:** {st(settings.get('profanity', True))}\n"
+                    f"🎁 **کد هنگی:** {st(settings.get('kodhengi', True))}\n\n"
                     f"👋 **خوش‌آمدگویی:** {ft(settings.get('welcome', True))}\n"
                     f"⭐ **کاربران ویژه:** {special_count}\n\n"
-                    "⚡ **FLUXBOT**"))
+                    "⚡ **BOT M4**"))
                 return
 
-            # ─── خوش‌آمدگویی ───
+            # خوش‌آمدگویی
             for _w in ("خوش آمدگویی", "خوش‌آمدگویی", "خوشامد گویی", "خوشامدگویی"):
                 res = match_two_word_cmd(clean_text, _w)
                 if res is not None:
                     settings["welcome"] = res
-                    bot_data["settings"] = settings
                     save_data(bot_data)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text=f"✅ **خوش‌آمدگویی** {'🟢 فعال' if res else '🔴 غیرفعال'} شد.\n\n⚡ **FLUXBOT**")
+                        text=f"✅ **خوش‌آمدگویی** {'🟢 فعال' if res else '🔴 غیرفعال'} شد.\n\n⚡ **BOT M4**")
                     return
 
             cwm = re.match(r"^تنظیم\s+پیام\s+خوش\s*آمدگویی\s+([\s\S]+)$", raw_text.strip())
@@ -778,14 +1005,14 @@ async def handle_message(bot, message):
                     save_data(bot_data)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                         text="✅ **پیام خوش‌آمدگویی تنظیم شد!**\n\n"
-                             "💡 متغیرها: `{name}` / `{group}` / `{time}`\n\n⚡ **FLUXBOT**")
+                             "💡 متغیرها: `{name}` / `{group}` / `{time}`\n\n⚡ **BOT M4**")
                 return
 
             if clean_text in ("حذف پیام خوش آمدگویی", "حذف پیام خوش‌آمدگویی"):
                 if bot_data.get("custom_welcome", {}).pop(chat_id, None) is not None:
                     save_data(bot_data)
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text="✅ **پیام حذف شد.**")
+                        text="✅ **پیام حذف شد.**\n\n⚡ **BOT M4**")
                 else:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                         text="ℹ️ پیام سفارشی وجود ندارد.")
@@ -801,37 +1028,37 @@ async def handle_message(bot, message):
                         text="ℹ️ پیام پیش‌فرض فعال است.")
                 return
 
-            # ─── راهنما ───
+            # راهنما
             if clean_text in ("راهنما", "کمک", "help"):
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
-                    "📚 **راهنمای FLUXBOT**\n"
+                    "📚 **راهنمای BOT M4**\n"
                     "━━━━━━━━━━━━━━━━━━━\n\n"
                     "🔒 **قفل‌ها:**\n"
                     "├ `لینک قفل` / `لینک باز`\n"
                     "├ `آیدی قفل` / `آیدی باز`\n"
                     "├ `اسپم قفل` / `اسپم باز`\n"
                     "├ `فحش قفل` / `فحش باز`\n"
-                    "├ `کد هنگی قفل` / `کد هنگی باز` (پیام‌های طولانی)\n"
+                    "├ `کد هنگی قفل` / `کد هنگی باز`\n"
                     "├ `خوش آمدگویی قفل` / `خوش آمدگویی باز`\n"
                     "└ `لیست قفل`\n\n"
                     "⭐ **ویژه:**\n"
-                    "├ `ویژه` (ریپلای روی کاربر)\n"
-                    "└ `حذف ویژه` (ریپلای روی کاربر)\n\n"
+                    "├ `ویژه` (ریپلای)\n"
+                    "└ `حذف ویژه` (ریپلای)\n\n"
                     "👋 **خوش‌آمدگویی:**\n"
                     "├ `تنظیم پیام خوش آمدگویی [متن]`\n"
                     "├ `نمایش پیام خوش آمدگویی`\n"
                     "└ `حذف پیام خوش آمدگویی`\n\n"
+                    "🎨 **فونت:**\n"
+                    "└ `فونت [متن]`\n\n"
                     "🎮 **بازی‌ها:**\n"
                     "├ `دوز` / `دوز قرمز` / `دوز زرد`\n"
                     "├ `شرکت` → پیوستن\n"
                     "├ `1` تا `7` → ستون\n"
                     "└ `بازی شیر یا خط`\n\n"
-                    "⚡ **FLUXBOT**"))
+                    "⚡ **BOT M4**"))
                 return
 
-        # ═══════════════════════════════════════════════════
-        # بررسی تخلف — فقط حذف، بدون اخطار/کیک/پیام
-        # ═══════════════════════════════════════════════════
+        # ═══════ بررسی تخلف — فقط حذف ═══════
         if not can_manage:
             violation = None
             if settings.get("id") and contains_id(raw_text):
@@ -854,7 +1081,7 @@ async def handle_message(bot, message):
                     print(f"⚠️ delete {violation}: {e}", flush=True)
                 return
 
-        # ═══════ خوش‌آمدگویی ═══════
+        # خوش‌آمدگویی
         if settings.get("welcome", True) and not can_manage:
             welcomed = bot_data.get("welcomed_users", {}).get(chat_id, {})
             if sender_id not in welcomed:
@@ -869,7 +1096,7 @@ async def handle_message(bot, message):
 
         games = get_games()
 
-        # ═══════ حل بازی شیر یا خط ═══════
+        # حل شیر یا خط
         if chat_id in coin_flip_games:
             cf = coin_flip_games[chat_id]
             if str(sender_id) == cf["player"] and raw_text.strip() in ("شیر", "خط"):
@@ -879,17 +1106,15 @@ async def handle_message(bot, message):
                 won = (choice == result)
                 if won:
                     text = (f"🪙 **نتیجه:** {result}\n\n"
-                            f"🎉 **{disp} برنده شد!** 🎉\n\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n⚡ **FLUXBOT**")
+                            f"🎉 **{disp} برنده شد!** 🎉\n\n⚡ **BOT M4**")
                 else:
                     text = (f"🪙 **نتیجه:** {result}\n\n"
-                            f"😢 **{disp} باخت!**\n\n"
-                            f"━━━━━━━━━━━━━━━━━━━\n⚡ **FLUXBOT**")
+                            f"😢 **{disp} باخت!**\n\n⚡ **BOT M4**")
                 await bot.send_message(chat_id=chat_id, text=text,
                     reply_to_message_id=message.message_id)
                 return
 
-        # ═══════ شروع شیر یا خط ═══════
+        # شروع شیر یا خط
         if clean_text in ("بازی شیر یا خط", "شیر یا خط", "شیریا خط"):
             if chat_id in coin_flip_games:
                 cf = coin_flip_games[chat_id]
@@ -911,10 +1136,10 @@ async def handle_message(bot, message):
                 f"🪙 **بازی شیر یا خط شروع شد!**\n\n"
                 f"👤 **بازیکن:** {disp}\n\n"
                 f"🎯 بنویس `شیر` یا `خط`\n\n"
-                f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **FLUXBOT**"))
+                f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **BOT M4**"))
             return
 
-        # ═══════ شروع دوز ═══════
+        # شروع دوز
         game_match = re.match(r"^(دوز|بازی دوز)\s*(قرمز|زرد)?$", clean_text)
         if game_match:
             if chat_id in games and games[chat_id].get("status") in ("waiting", "playing"):
@@ -952,10 +1177,10 @@ async def handle_message(bot, message):
                 f"🎮 **بازی دوز شروع شد!**\n\n"
                 f"👤 **سازنده:** {disp}\n🎨 **رنگ:** {ce}\n\n"
                 f"⏳ **منتظر حریف...**\n\n📌 پیوستن: `شرکت`\n"
-                f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **FLUXBOT**"))
+                f"⏱️ ۲ دقیقه فرصت.\n\n⚡ **BOT M4**"))
             return
 
-        # ═══════ شرکت در دوز ═══════
+        # شرکت در دوز
         if clean_text in ("شرکت", "join"):
             if chat_id not in games:
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -983,10 +1208,10 @@ async def handle_message(bot, message):
                 f"{c1} **{g['player1_name']}**  vs  {c2} **{g['player2_name']}**\n\n"
                 f"```\n{board_txt}\n```\n\n"
                 f"🎯 **نوبت:** {g['player1_name']} ({c1})\n\n"
-                f"📌 عدد 1 تا 7 بفرست.\n\n⚡ **FLUXBOT**"))
+                f"📌 عدد 1 تا 7 بفرست.\n\n⚡ **BOT M4**"))
             return
 
-        # ═══════ انصراف ═══════
+        # انصراف
         if clean_text in ("انصراف", "لغو"):
             if chat_id in coin_flip_games and sender_id == coin_flip_games[chat_id]["player"]:
                 del coin_flip_games[chat_id]
@@ -1002,7 +1227,7 @@ async def handle_message(bot, message):
                     return
             return
 
-        # ═══════ حرکت در دوز ═══════
+        # حرکت در دوز
         if chat_id in games and games[chat_id].get("status") == "playing":
             g = games[chat_id]
             if sender_id in (g["player1"], g["player2"]):
@@ -1027,13 +1252,13 @@ async def handle_message(bot, message):
                         del games[chat_id]; save_data(bot_data)
                         await bot.send_message(chat_id=chat_id,
                             text=f"🏆 **برنده!** 🏆\n\n{ce} **{pname}** برنده شد!\n\n"
-                                 f"```\n{bt}\n```\n\n⚡ **FLUXBOT**")
+                                 f"```\n{bt}\n```\n\n⚡ **BOT M4**")
                         return
                     if is_board_full(g["board"]):
                         bt = render_board(g["board"])
                         del games[chat_id]; save_data(bot_data)
                         await bot.send_message(chat_id=chat_id,
-                            text=f"🤝 **مساوی!**\n\n```\n{bt}\n```\n\n⚡ **FLUXBOT**")
+                            text=f"🤝 **مساوی!**\n\n```\n{bt}\n```\n\n⚡ **BOT M4**")
                         return
                     g["turn"] = g["player2"] if g["turn"] == g["player1"] else g["player1"]
                     save_data(bot_data)
@@ -1073,11 +1298,10 @@ async def cleanup_task():
 
 # ═══════════════════ main ═══════════════════
 async def main():
-    print("🤖 FLUXBOT v3 STARTING...", flush=True)
+    print("⚡ BOT M4 v3.1 STARTING...", flush=True)
     print(f"👑 OWNER: {OWNER_ID}", flush=True)
-    print("🔒 Locks: link, id, spam, profanity, kodhengi", flush=True)
-    print("⭐ Features: Special users, Welcome", flush=True)
-    print("🎮 Games: Connect4 + Coin Flip", flush=True)
+    print("🔒 Locks: link, id, spam, profanity, kodhengi (ALL ON)", flush=True)
+    print("⭐ Features: Special users, Welcome, Font, Games", flush=True)
     print(f"⚙️  Bot Active: {bot_is_active}", flush=True)
     try: asyncio.create_task(cleanup_task())
     except: pass
