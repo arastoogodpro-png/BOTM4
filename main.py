@@ -10,7 +10,8 @@ from datetime import datetime, timedelta, timezone
 from rubka import Robot, Message
 
 # ═════════════════════════════════════════════════════════════
-# ⚡ BOT M4 ⚡ — v3.2 (Fixed Owner System)
+# ⚡ BOT M4 ⚡ — v3.3
+# GIF lock + smart profanity + scoped permissions + welcome OFF
 # ═════════════════════════════════════════════════════════════
 
 TOKEN = os.getenv("RUBIKA_TOKEN", "").strip()
@@ -76,7 +77,8 @@ _DEFAULT_SETTINGS = {
     "spam": True,
     "profanity": True,
     "kodhengi": True,
-    "welcome": True,
+    "gif": True,        # NEW
+    "welcome": False,   # CHANGED: off by default
 }
 _DEFAULT_DATA = {
     "started_users": [], "known_groups": [], "known_users": {},
@@ -386,25 +388,73 @@ def contains_id(text):
     return False
 
 
-def contains_kodhengi(text):
-    if not text: return False
-    s = str(text)
-    if len(s) > KODHENGI_MAX_LEN:
+# ─────────── GIF detection ───────────
+def is_gif(message):
+    """تشخیص گیف از ویژگی‌ها، type، و داده‌های تودرتوی روبیکا"""
+    if message is None:
+        return False
+
+    def _truthy(v):
+        if v is None or v is False or v == '' or v == 0:
+            return False
+        if isinstance(v, (dict, list, tuple)) and not v:
+            return False
         return True
-    if re.search(r'(.)\1{' + str(KODHENGI_MAX_SAME_CHAR) + r',}', s, re.DOTALL):
-        return True
-    if s.count('\n') > KODHENGI_MAX_LINES:
-        return True
-    for line in s.split('\n'):
-        if len(line) > KODHENGI_MAX_LINE_LEN:
-            return True
-    for w in s.split():
-        if len(w) > 200:
-            return True
+
+    # 1. Direct attributes
+    for attr in ('is_gif', 'gif', 'animation', 'is_animation',
+                 'gif_message', 'gifMessage', 'sticker_gif'):
+        try:
+            if _truthy(getattr(message, attr, None)):
+                return True
+        except: pass
+
+    # 2. Message type
+    for attr in ('type', 'message_type', 'messageType', 'content_type', 'media_type', 'file_type'):
+        try:
+            v = getattr(message, attr, None)
+            if v:
+                s = str(v).lower().replace('_', '').replace('-', '')
+                if 'gif' in s or 'animation' in s:
+                    return True
+        except: pass
+
+    # 3. Nested data (limited)
+    for attr in ('raw_data', 'rawData', 'data', 'message', 'content',
+                 'aux_data', 'auxData', 'media', 'attachment', 'file'):
+        try:
+            v = getattr(message, attr, None)
+            if isinstance(v, str):
+                try: v = json.loads(v)
+                except: continue
+            if isinstance(v, dict):
+                for k, item in v.items():
+                    kl = str(k).lower().replace('_', '').replace('-', '')
+                    if 'gif' in kl or 'animation' in kl:
+                        if _truthy(item): return True
+                    if kl in ('type', 'messagetype', 'contenttype', 'mediatype',
+                              'filetype', 'mimetype', 'mime'):
+                        if 'gif' in str(item).lower() or 'animation' in str(item).lower():
+                            return True
+        except: pass
     return False
 
 
-# ─────────── فحش ───────────
+# ─────────── کد هنگی ───────────
+def contains_kodhengi(text):
+    if not text: return False
+    s = str(text)
+    if len(s) > KODHENGI_MAX_LEN: return True
+    if re.search(r'(.)\1{' + str(KODHENGI_MAX_SAME_CHAR) + r',}', s, re.DOTALL): return True
+    if s.count('\n') > KODHENGI_MAX_LINES: return True
+    for line in s.split('\n'):
+        if len(line) > KODHENGI_MAX_LINE_LEN: return True
+    for w in s.split():
+        if len(w) > 200: return True
+    return False
+
+
+# ─────────── فحش (نسخه هوشمند) ───────────
 def _normalize_persian(text):
     t = str(text).lower()
     t = t.replace('ك', 'ک').replace('ي', 'ی').replace('ۀ', 'ه').replace('ة', 'ه')
@@ -413,35 +463,57 @@ def _normalize_persian(text):
     return t
 
 
-_PROFANITY_ROOTS = [
-    "کیرکش", "کیرخور", "کیرمغز", "کیرخوار",
-    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "کسخور", "کصشر", "کسشر",
-    "کونکش", "کونخور", "کونده",
+# ریشه‌های چندحرفی — تطبیق substring امن
+_PROFANITY_ROOTS = {
+    # کیر ترکیبات
+    "کیرکش", "کیرخور", "کیرخوار", "کیرخوری", "کیرمغز",
+    # کص ترکیبات
+    "کصکش", "کسکش", "کصخل", "کسخل", "کصخور", "کسخور",
+    "کصشر", "کسشر", "کصمغز", "کصمغزی",
+    # کون ترکیبات
+    "کونکش", "کونخور", "کونده", "کونمغز",
+    # توهین‌های سنگین
     "خارکصه", "خارکصده", "خارکسده",
-    "جنده", "جاکش",
-    "دیوث",
-    "حرومزاد", "حرومزادگی",
-    "بیناموس",
-    "پدرسوخته", "مادرسوخته",
-    "لاشی", "لاشخور",
-    "کثافت", "قرمساق", "پفیوز",
-]
-
-_PROFANITY_PREFIXES = [
-    "کیر", "کص", "کون", "گوه", "شاش",
-]
-
-_SAFE_WORDS = {
-    "کیرلا", "کیرالا", "کیروان", "کیرل", "کیرو", "کیرا", "کیرست",
-    "شاکیرا", "شکیرا", "الکیر",
-    "کونگ", "کونگفو", "کونکورد", "کونگور", "کونوی", "کونان",
-    "کونسول", "کونسولی", "کونفرانس", "کونترات", "کونترال",
-    "کونیا", "کونیاک", "کونیفر",
-    "گوهر", "گوهری", "گوهردشت", "گهر", "گوهران",
-    "گهگاه", "گهواره", "گهی", "گهنم",
-    "شاشه", "شاشیه",
+    "جنده", "جاکش", "جندگی",
+    "دیوث", "دیوثه",
+    "حرومزاد", "حرومزادگی", "حرومزاده",
+    "بیناموس", "بیناموست",
+    "پدرسوخته", "مادرسوخته", "پدرسگ", "مادرسگ",
+    "لاشی", "لاشخور", "لاشخور",
+    "کثافت", "کثافتکار", "قرمساق", "پفیوز",
+    "مادرخراب", "مادرجنده", "مادرجندگی",
+    "ننت", "ننش", "ننمو",
 }
 
+# ریشه‌های کوتاه — فقط ابتدای کلمه
+_PROFANITY_PREFIXES = {
+    "کیر", "کص", "کون", "گوه", "شاش",
+}
+
+# کلمات امن — ریشه دارن ولی فحش نیستن
+_SAFE_WORDS = {
+    # کیر
+    "کیرلا", "کیرالا", "کیروان", "کیرل", "کیرو", "کیرا", "کیرست",
+    "کیران", "کیرانه", "کیرانی",
+    "شاکیرا", "شکیرا", "الکیر",
+    # کون
+    "کونگ", "کونگفو", "کونکورد", "کونگور", "کونوی", "کونان",
+    "کونسول", "کونسولی", "کونفرانس", "کونترات", "کونترال",
+    "کونیا", "کونیاک", "کونیفر", "کونا", "کوناک", "کوناس",
+    # گوه
+    "گوهر", "گوهری", "گوهردشت", "گهر", "گوهران",
+    # شاش
+    "شاشه", "شاشیه", "شاشیدم",
+}
+
+# عبارت‌های ترکیبی با فاصله
+_PROFANITY_PHRASES = [
+    "مادر خراب", "مادرت خراب", "مادرتو خراب",
+    "پدر سوخته",
+    "حروم زاده",
+]
+
+# فحش انگلیسی
 _PROFANITY_EN = re.compile(
     r'\b(?:fuck|f\*ck|fucking|fucker|motherfucker|shit|bullshit|'
     r'bitch|asshole|dickhead|pussy|cunt|whore|slut|bastard|wanker)\b',
@@ -450,27 +522,72 @@ _PROFANITY_EN = re.compile(
 
 
 def _word_is_profanity(w):
-    if w in _SAFE_WORDS:
-        return False
+    if not w: return False
+    if w in _SAFE_WORDS: return False
     for root in _PROFANITY_ROOTS:
-        if root in w:
-            return True
+        if root in w: return True
     for pref in _PROFANITY_PREFIXES:
-        if w.startswith(pref):
-            return True
+        if w.startswith(pref): return True
     return False
 
 
 def contains_profanity(text):
+    """
+    تشخیص فحش با ۴ لایه:
+    1. فحش انگلیسی
+    2. تطبیق توکن ساده (کیرمو، کصکش و...)
+    3. تطبیق عبارت ترکیبی (مادر خراب)
+    4. De-evasion: حذف نقاط/ستاره/آندرلاین برای ک.ی.ر و کی..ر
+    5. Short-message check برای کی ر
+    """
     if not text: return False
     raw = str(text)
+
+    # 1. English
     if _PROFANITY_EN.search(raw):
         return True
+
+    # 2. Token check
     t = _normalize_persian(raw)
-    words = re.findall(r'[آ-ی]+', t)
-    for w in words:
+    for w in re.findall(r'[آ-ی]+', t):
         if _word_is_profanity(w):
             return True
+
+    # 3. Phrase check (space-tolerant)
+    joined_ns = re.sub(r'\s+', '', t)
+    for phrase in _PROFANITY_PHRASES:
+        norm_p = re.sub(r'\s+', '', _normalize_persian(phrase))
+        if norm_p and norm_p in joined_ns:
+            return True
+
+    # 4. De-evasion: dots/asterisks/underscores between Persian letters
+    if re.search(r'[آ-ی][\.\_\-\*\+]+[آ-ی]', t):
+        just_persian = re.sub(r'[^آ-ی]', '', t)
+        if 3 <= len(just_persian) <= 25 and just_persian not in _SAFE_WORDS:
+            if _word_is_profanity(just_persian):
+                return True
+
+    # 5. Short-message check (spaced letters evasion: "کی ر")
+    just_persian = re.sub(r'[^آ-ی]', '', t)
+    if 3 <= len(just_persian) <= 10 and just_persian not in _SAFE_WORDS:
+        if _word_of_profanity_short(just_persian):
+            return True
+
+    return False
+
+
+def _word_of_profanity_short(w):
+    """برای پیام‌های کوتاه - تطبیق کل با ریشه‌های کامل"""
+    if not w or w in _SAFE_WORDS: return False
+    # فقط ریشه‌های قوی
+    if w.startswith("کیر") or w.startswith("کص") or w.startswith("کون"):
+        # طول ≤ 8 که اسم/کلمه عادی نباشه
+        if len(w) <= 8:
+            return True
+    if w.startswith("گوه") and len(w) <= 6:
+        return True
+    if w.startswith("شاش") and len(w) <= 6:
+        return True
     return False
 
 
@@ -789,7 +906,7 @@ async def handle_message(bot, message):
         if is_group_chat(chat_id) and chat_id not in (bot_data.get("known_groups") or []):
             bot_data.setdefault("known_groups", []).append(chat_id)
             get_group_settings(chat_id)
-            print(f"🆕 گروه جدید: {chat_id} — همه قفل‌ها فعال", flush=True)
+            print(f"🆕 گروه جدید: {chat_id} — همه قفل‌ها فعال، خوش‌آمد خاموش", flush=True)
             save_data(bot_data)
 
         print(f"📩 {chat_id} | {sender_id} | {raw_text!r}", flush=True)
@@ -805,21 +922,24 @@ async def handle_message(bot, message):
         role = ui["role"]
         disp = format_user_display(ui, sender_id)
 
-        # ─── نقش و مجوز (بدون OWNER_ID) ───
+        # ─── نقش و مجوز ───
         group_owner = bot_data.get("group_owners", {}).get(chat_id)
         is_registered_owner = (str(sender_id) == str(group_owner)) if group_owner else False
         is_rubika_creator = (role == "مالک")
-        is_special = bot_data.get("special_users", {}).get(chat_id, {}).get(sender_id, False)
         is_owner_group = is_registered_owner or is_rubika_creator
-        can_manage = is_owner_group or is_special
+        is_group_admin = (role == "ادمین")
+        is_special = bot_data.get("special_users", {}).get(chat_id, {}).get(sender_id, False)
+        is_editor = is_special or is_group_admin
+        can_manage = is_owner_group or is_editor
 
         # ═══════════ فعال‌سازی ═══════════
         if clean_text in ("فعال", "فاعل"):
             if not is_rubika_creator:
                 is_rubika_creator = await is_actual_group_owner(chat_id, sender_id)
+                if is_rubika_creator:
+                    is_owner_group = True
 
             if not group_owner:
-                # اولین نفر: ثبت به عنوان مالک
                 bot_data.setdefault("group_owners", {})[chat_id] = str(sender_id)
                 save_data(bot_data)
                 if not bot_is_active:
@@ -890,10 +1010,43 @@ async def handle_message(bot, message):
             except: pass
             return
 
-        # ═══════════ دستورات مدیریتی ═══════════
-        if can_manage:
-            # ویژه (فقط مالک گروه)
-            if is_owner_group and clean_text in ("ویژه", "ادمین"):
+        # ═══════════ راهنما (برای همه) ═══════════
+        if clean_text in ("راهنما", "کمک", "help"):
+            await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
+                "📚 **راهنمای BOT M4**\n"
+                "━━━━━━━━━━━━━━━━━━━\n\n"
+                "🔒 **قفل‌ها:**\n"
+                "├ `لینک قفل` / `لینک باز`\n"
+                "├ `آیدی قفل` / `آیدی باز`\n"
+                "├ `اسپم قفل` / `اسپم باز` (فقط مالک)\n"
+                "├ `فحش قفل` / `فحش باز` (فقط مالک)\n"
+                "├ `کد هنگی قفل` / `کد هنگی باز` (فقط مالک)\n"
+                "├ `گیف قفل` / `گیف باز`\n"
+                "├ `خوش آمدگویی قفل` / `خوش آمدگویی باز` (فقط مالک)\n"
+                "└ `لیست قفل` (فقط مالک)\n\n"
+                "⭐ **ویژه (فقط مالک):**\n"
+                "├ `ویژه` (ریپلای)\n"
+                "└ `حذف ویژه` (ریپلای)\n\n"
+                "👑 **دسترسی‌ها:**\n"
+                "├ **مالک:** همه‌چیز\n"
+                "├ **ادمین/ویژه:** فقط لینک، آیدی، گیف\n"
+                "└ **اعضا:** بازی و فونت\n\n"
+                "🎨 **فونت:**\n"
+                "└ `فونت [متن]`\n\n"
+                "🎮 **بازی‌ها:**\n"
+                "├ `دوز` / `دوز قرمز` / `دوز زرد`\n"
+                "├ `شرکت` → پیوستن\n"
+                "├ `1` تا `7` → ستون\n"
+                "└ `بازی شیر یا خط`\n\n"
+                "⚡ **BOT M4**"))
+            return
+
+        # ═══════════════════════════════════════════════════
+        # مالک گروه — همه دستورات
+        # ═══════════════════════════════════════════════════
+        if is_owner_group:
+            # ویژه
+            if clean_text in ("ویژه", "ادمین"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -913,12 +1066,12 @@ async def handle_message(bot, message):
                 _name = get_display_for_user(tgt)
                 await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
                     text=f"⭐ **{_name} ویژه شد!**\n\n"
-                         f"✅ حالا تمام دستورات مدیریتی رو داره.\n\n"
+                         f"✅ حالا می‌تونه فقط **لینک، آیدی، گیف** رو مدیریت کنه.\n\n"
                          f"🔓 برای لغو: `حذف ویژه` (ریپلای)\n\n⚡ **BOT M4**")
                 return
 
-            # حذف ویژه (فقط مالک گروه)
-            if is_owner_group and clean_text in ("حذف ویژه", "لغو ویژه"):
+            # حذف ویژه
+            if clean_text in ("حذف ویژه", "لغو ویژه"):
                 tgt = await find_reply_target(message, chat_id)
                 if not tgt:
                     await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
@@ -935,24 +1088,6 @@ async def handle_message(bot, message):
                         text="ℹ️ این کاربر ویژه نبود.")
                 return
 
-            # قفل‌ها
-            lock_cmds = {
-                "لینک": "link",
-                "آیدی": "id",
-                "اسپم": "spam",
-                "فحش": "profanity",
-                "کد هنگی": "kodhengi",
-                "کدهنگی": "kodhengi",
-            }
-            for word, key in lock_cmds.items():
-                res = match_two_word_cmd(clean_text, word)
-                if res is not None:
-                    set_lock(chat_id, key, res)
-                    state = "🔒 قفل" if res else "🔓 باز"
-                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
-                        text=f"{state} **{word}** شد.\n\n⚡ **BOT M4**")
-                    return
-
             # لیست قفل
             if clean_text == "لیست قفل":
                 def st(v): return "🔴 بسته" if v else "🟢 باز"
@@ -967,8 +1102,9 @@ async def handle_message(bot, message):
                     f"🆔 **آیدی:** {st(settings.get('id', True))}\n"
                     f"📢 **اسپم:** {st(settings.get('spam', True))}\n"
                     f"🤬 **فحش:** {st(settings.get('profanity', True))}\n"
-                    f"🎁 **کد هنگی:** {st(settings.get('kodhengi', True))}\n\n"
-                    f"👋 **خوش‌آمدگویی:** {ft(settings.get('welcome', True))}\n"
+                    f"🎁 **کد هنگی:** {st(settings.get('kodhengi', True))}\n"
+                    f"🎬 **گیف:** {st(settings.get('gif', True))}\n\n"
+                    f"👋 **خوش‌آمدگویی:** {ft(settings.get('welcome', False))}\n"
                     f"⭐ **کاربران ویژه:** {special_count}\n"
                     f"👑 **مالک گروه:** {owner_name}\n\n"
                     "⚡ **BOT M4**"))
@@ -1014,37 +1150,47 @@ async def handle_message(bot, message):
                         text="ℹ️ پیام پیش‌فرض فعال است.")
                 return
 
-            # راهنما
-            if clean_text in ("راهنما", "کمک", "help"):
-                await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id, text=(
-                    "📚 **راهنمای BOT M4**\n"
-                    "━━━━━━━━━━━━━━━━━━━\n\n"
-                    "🔒 **قفل‌ها:**\n"
-                    "├ `لینک قفل` / `لینک باز`\n"
-                    "├ `آیدی قفل` / `آیدی باز`\n"
-                    "├ `اسپم قفل` / `اسپم باز`\n"
-                    "├ `فحش قفل` / `فحش باز`\n"
-                    "├ `کد هنگی قفل` / `کد هنگی باز`\n"
-                    "├ `خوش آمدگویی قفل` / `خوش آمدگویی باز`\n"
-                    "└ `لیست قفل`\n\n"
-                    "⭐ **ویژه (فقط مالک):**\n"
-                    "├ `ویژه` (ریپلای)\n"
-                    "└ `حذف ویژه` (ریپلای)\n\n"
-                    "👋 **خوش‌آمدگویی:**\n"
-                    "├ `تنظیم پیام خوش آمدگویی [متن]`\n"
-                    "├ `نمایش پیام خوش آمدگویی`\n"
-                    "└ `حذف پیام خوش آمدگویی`\n\n"
-                    "🎨 **فونت:**\n"
-                    "└ `فونت [متن]`\n\n"
-                    "🎮 **بازی‌ها:**\n"
-                    "├ `دوز` / `دوز قرمز` / `دوز زرد`\n"
-                    "├ `شرکت` → پیوستن\n"
-                    "├ `1` تا `7` → ستون\n"
-                    "└ `بازی شیر یا خط`\n\n"
-                    "⚡ **BOT M4**"))
+        # ═══════════════════════════════════════════════════
+        # قفل‌های محتوا (مالک: همه — ادیتور: فقط لینک/آیدی/گیف)
+        # ═══════════════════════════════════════════════════
+        lock_cmds = {
+            "لینک": "link",
+            "آیدی": "id",
+            "اسپم": "spam",
+            "فحش": "profanity",
+            "کد هنگی": "kodhengi",
+            "کدهنگی": "kodhengi",
+            "گیف": "gif",
+            "gif": "gif",
+        }
+        editor_allowed = {"لینک", "آیدی", "گیف", "gif"}
+
+        for word, key in lock_cmds.items():
+            res = match_two_word_cmd(clean_text, word)
+            if res is not None:
+                if is_owner_group:
+                    set_lock(chat_id, key, res)
+                    state = "🔒 قفل" if res else "🔓 باز"
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text=f"{state} **{word}** شد.\n\n⚡ **BOT M4**")
+                    return
+                elif is_editor and word in editor_allowed:
+                    set_lock(chat_id, key, res)
+                    state = "🔒 قفل" if res else "🔓 باز"
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text=f"{state} **{word}** شد.\n\n⚡ **BOT M4**")
+                    return
+                elif is_editor:
+                    await bot.send_message(chat_id=chat_id, reply_to_message_id=message.message_id,
+                        text=f"⚠️ **فقط مالک گروه** می‌تونه «{word}» رو مدیریت کنه.\n\n"
+                             f"🔐 دسترسی شما: فقط لینک، آیدی، گیف\n\n⚡ **BOT M4**")
+                    return
+                # else: کاربر عادی → ignore
                 return
 
-        # ═══════════ بررسی تخلف — فقط حذف ═══════════
+        # ═══════════════════════════════════════════════════
+        # بررسی تخلف — فقط حذف بی‌صدا
+        # ═══════════════════════════════════════════════════
         if not can_manage:
             violation = None
             if settings.get("id") and contains_id(raw_text):
@@ -1055,6 +1201,8 @@ async def handle_message(bot, message):
                 violation = "PROFANITY"
             elif settings.get("kodhengi") and contains_kodhengi(raw_text):
                 violation = "KODHENGI"
+            elif settings.get("gif") and is_gif(message):
+                violation = "GIF"
             elif settings.get("spam", True) and msg_id:
                 if await handle_spam_check(chat_id, sender_id, msg_id):
                     return
@@ -1068,7 +1216,7 @@ async def handle_message(bot, message):
                 return
 
         # ═══════════ خوش‌آمدگویی ═══════════
-        if settings.get("welcome", True) and not can_manage:
+        if settings.get("welcome", False) and not can_manage:
             welcomed = bot_data.get("welcomed_users", {}).get(chat_id, {})
             if sender_id not in welcomed:
                 cn = await get_chat_name(chat_id)
@@ -1283,9 +1431,11 @@ async def cleanup_task():
 
 # ═══════════════════ main ═══════════════════
 async def main():
-    print("⚡ BOT M4 v3.2 STARTING...", flush=True)
-    print("🔒 Locks: link, id, spam, profanity, kodhengi (ALL ON)", flush=True)
-    print("👑 Owner System: per-group (first 'فعال' = owner)", flush=True)
+    print("⚡ BOT M4 v3.3 STARTING...", flush=True)
+    print("🔒 Locks: link, id, spam, profanity, kodhengi, gif (ALL ON)", flush=True)
+    print("👑 Owner System: per-group", flush=True)
+    print("🔐 Editors (admin/special): ONLY link/id/gif toggles", flush=True)
+    print("👋 Welcome: OFF by default (owner must enable)", flush=True)
     print("⭐ Features: Special users, Welcome, Font, Games", flush=True)
     print(f"⚙️  Bot Active: {bot_is_active}", flush=True)
     try: asyncio.create_task(cleanup_task())
